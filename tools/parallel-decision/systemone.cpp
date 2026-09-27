@@ -85,6 +85,20 @@ void check_question(errors & errs, const common_json & loc, const common_json & 
     if (q.contains("instructions")) {
         check_any(errs, at_key(l, "instructions"), q.at("instructions"), true);
     }
+    // extension: how choice options are written in the answer (see label_mode)
+    if (q.contains("x_labels")) {
+        const common_json & v  = q.at("x_labels");
+        const common_json   lx = at_key(l, "x_labels");
+        if (!v.is_string() || (v.get<std::string>() != "names" && v.get<std::string>() != "letters" && v.get<std::string>() != "numbers")) {
+            errs.add(lx, "literal_error", "Input should be 'names', 'letters' or 'numbers'", v,
+                     common_json{ { "expected", "'names', 'letters' or 'numbers'" } });
+        } else if (t != "choice") {
+            errs.add(lx, "value_error", "Value error, x_labels applies to choice questions only", v);
+        } else if (v.get<std::string>() == "letters" && q.contains("criteria") && q.at("criteria").is_object() &&
+                   q.at("criteria").size() > 26) {
+            errs.add(lx, "value_error", "Value error, letters support at most 26 choices", v);
+        }
+    }
 
     if (t == "noul") {
         if (!q.contains("criteria") || q.at("criteria").is_null()) {
@@ -312,12 +326,23 @@ compiled_schema compile(const common_json & questions) {
             allowed   = "- true: " + (yes.empty() ? std::string("yes, or the statement is true") : yes) +
                         "\n- false: " + (no.empty() ? std::string("no, or the statement is false") : no);
         } else if (type == "choice") {
+            // names: the model writes the option name; letters / numbers: a code listed next to the name
+            const std::string labels = q.value("x_labels", std::string("names"));
             f.type = "enum";
+            size_t k = 0;
             for (const auto & [key, val] : q.at("criteria").items()) {
                 const std::string desc = text_of(val);
+                const std::string code = labels == "letters" ? json_text(std::string(1, (char) ('A' + k)))
+                                       : labels == "numbers" ? std::to_string(k + 1)
+                                       : json_text(key);
                 f.values.push_back(common_json(key));
-                f.encoded.push_back(json_text(key));
-                allowed += (allowed.empty() ? "" : "\n") + std::string("- ") + json_text(key) + (desc.empty() ? "" : ": " + desc);
+                f.encoded.push_back(code);
+                allowed += (allowed.empty() ? "" : "\n") + std::string("- ") + code +
+                           (labels == "names" ? "" : " = " + json_text(key)) + (desc.empty() ? "" : ": " + desc);
+                ++k;
+            }
+            if (labels != "names") {
+                allowed = "(answer with the code)\n" + allowed;
             }
         } else {
             f.type = "integer";

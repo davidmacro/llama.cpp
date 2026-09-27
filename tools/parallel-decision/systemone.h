@@ -5,6 +5,10 @@
 // Each question becomes one engine field: noul -> true/false, choice -> the criteria keys as JSON
 // strings, score -> the level indices 0..n-1. Every field is scored in tree mode, so each answer
 // carries the exact distribution over its allowed values.
+//
+// Extension: a choice question may set "x_labels": "names" (default, the model writes the option
+// name), "letters" (A..Z) or "numbers" (1..N), listed next to each name in the prompt. Answers
+// stay keyed by the option names.
 
 #include "decision-engine.h"
 #include "json.h"

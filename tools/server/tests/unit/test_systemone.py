@@ -336,3 +336,41 @@ def test_official_sdk():
         assert r.choices["category"].choice in ("billing", "technical")
         with pytest.raises(ts.TypeSafeNotFoundError):
             client.system_one(model="nope", state="x", questions={"q": ts.Noul()})
+
+
+def test_systemone_labels_per_question():
+    global server
+    server.start()
+    req = {
+        "model": "tinyllama-2",
+        "state": "Ik ben twee keer afgeschreven.",
+        "questions": {
+            "language": {"type": "choice", "criteria": {"NL": "Dutch", "EN": "English"}},
+            "topic": {"type": "choice", "x_labels": "letters", "criteria": {"billing": None, "technical": None, "other": None}},
+            "priority": {"type": "choice", "x_labels": "numbers", "criteria": {f"p{i}": None for i in range(12)}},
+        },
+    }
+    res = server.make_request("POST", "/v1/systemone?debug=1", data=req)
+    assert res.status_code == 200, res.body
+    body = dict(res.body)
+    prompt = body.pop("x_debug")["system_prompt"]
+    check_answers(req, body)  # still keyed by the option names
+    assert '- "NL": Dutch' in prompt
+    assert '- "A" = "billing"' in prompt and '- "C" = "other"' in prompt
+    assert '- 12 = "p11"' in prompt
+
+
+@pytest.mark.parametrize("question,expected", [
+    ({"type": "choice", "x_labels": "roman", "criteria": {"a": None}}, "literal_error"),
+    ({"type": "choice", "x_labels": 1, "criteria": {"a": None}}, "literal_error"),
+    ({"type": "noul", "x_labels": "letters"}, "value_error"),
+    ({"type": "score", "x_labels": "numbers", "criteria": ["a"]}, "value_error"),
+    ({"type": "choice", "x_labels": "letters", "criteria": {f"k{i}": None for i in range(27)}}, "value_error"),
+])
+def test_systemone_labels_validation(question, expected):
+    global server
+    server.start()
+    res = server.make_request("POST", "/v1/systemone", data={"model": "tinyllama-2", "state": "x", "questions": {"q": question}})
+    errs = detail(res)
+    assert [e["type"] for e in errs] == [expected]
+    assert errs[0]["loc"] == ["body", "questions", "q", question["type"], "x_labels"]

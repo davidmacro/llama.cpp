@@ -149,6 +149,12 @@ How questions map to the engine; every question is scored in tree mode, so each 
 
 - The questions (with their instructions and criteria descriptions) form the cached system prompt; the state is the
   user message (objects and arrays as indented JSON). Each question is scored as the first key of the answer object.
+- Extension, per `choice` question: `"x_labels": "names"` (default: the model writes the option name), `"letters"`
+  (`A`..`Z`, at most 26 options) or `"numbers"` (`1`..`N`). With codes, the prompt lists `- "A" = "billing": ...` and
+  the model answers with the code; `choice` and `probabilities` stay keyed by the names. Different questions in one
+  request can use different modes. On Gemma 4 E4B names were never worse than codes and clearly better when options
+  have no description (codes: -4 to -7 points accuracy, answer changes with option order for 22-25% of items vs 0-17%);
+  codes only matched names with opaque keys such as ids.
 - `confidence`: `--systemone-confidence entropy` (default, 1 - normalised entropy) or `max` (highest probability).
   Neither is TypeSafe's calibrated confidence.
 - `usage.input_tokens` is the whole rendered prompt, cached or not; `usage.output_tokens` is the number of questions.
