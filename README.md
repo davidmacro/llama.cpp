@@ -11,10 +11,32 @@ only the base URL. No adapter or proxy runs in front of the server.
 
 Branch `systemone`. The upstream llama.cpp README is kept as [README-llama.cpp.md](README-llama.cpp.md).
 
+## Built on parallel-decision by thecodacus
+
+The core of this fork is not ours. It is the **parallel decision engine** by
+[thecodacus](https://github.com/thecodacus), from the
+[`parallel-decision`](https://github.com/thecodacus/llama.cpp/tree/parallel-decision) branch of
+[thecodacus/llama.cpp](https://github.com/thecodacus/llama.cpp). This branch starts from that branch unchanged
+(commit `ad129b08d`) and adds System One on top.
+
+thecodacus designed and built:
+
+- the engine that answers a finite schema by scoring every allowed value as token paths forked from one cached
+  context, all in one batched `llama_decode`, with exact constrained probabilities in tree mode
+  ([decision-engine.cpp](tools/parallel-decision/decision-engine.cpp));
+- `POST /v1/decision` in `llama-server` and the `--decision-seqs` option (`b9244f893`);
+- the `llama-parallel-decision` CLI and the [engine README](tools/parallel-decision/README.md) (`14d04e755`);
+- single-pass scoring for hybrid and recurrent models (`ad129b08d`);
+- [decision-playground](https://github.com/thecodacus/decision-playground), a browser UI for the endpoint.
+
+What this fork adds: the System One wire format (`/v1/systemone`, validation, `/v1/models` fields, router support),
+request coalescing, the `x_labels` extension, two small engine changes (a per-field terminator and `make_input()`), and
+the tests and measurements below. The speed and exact probabilities described here come from thecodacus's engine.
+
 ## How it works
 
 Every question has a finite set of allowed answers. Instead of generating JSON token by token, the server scores all
-allowed answers of all questions in one batched forward pass, forked from one cached prompt, using the parallel
+allowed answers of all questions in one batched forward pass, forked from one cached prompt, using thecodacus's parallel
 decision engine in [tools/parallel-decision](tools/parallel-decision). Each answer comes with the exact probability
 distribution over its allowed values, normalised over those values only (no top-k truncation).
 
@@ -204,7 +226,10 @@ downloads a tiny model, so the build needs HTTPS: OpenSSL, or `-DLLAMA_BUILD_BOR
 
 ## Credits
 
-Built on [llama.cpp](https://github.com/ggml-org/llama.cpp) and on the parallel decision engine from
-[thecodacus/llama.cpp](https://github.com/thecodacus/llama.cpp) (`parallel-decision` branch). System One and its API
-are by [TypeSafe AI](https://typesafe.ai); this project is not affiliated with TypeSafe AI. MIT license, see
-[LICENSE](LICENSE).
+- **Parallel decision engine, `/v1/decision`, `llama-parallel-decision`:** [thecodacus](https://github.com/thecodacus),
+  [thecodacus/llama.cpp @ parallel-decision](https://github.com/thecodacus/llama.cpp/tree/parallel-decision). See
+  [Built on parallel-decision by thecodacus](#built-on-parallel-decision-by-thecodacus).
+- **llama.cpp:** [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) and its contributors.
+- **System One API:** [TypeSafe AI](https://typesafe.ai). This project is not affiliated with TypeSafe AI.
+
+MIT license, see [LICENSE](LICENSE). Commit history keeps each author's work under their own name.
