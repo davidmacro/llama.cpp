@@ -28,6 +28,7 @@ enum server_task_type {
     SERVER_TASK_TYPE_GET_LORA,
     SERVER_TASK_TYPE_SET_LORA,
     SERVER_TASK_TYPE_DECISION,
+    SERVER_TASK_TYPE_SYSTEMONE,
 };
 
 // TODO: change this to more generic "response_format" to replace the "format_response_*" in server-common
@@ -173,7 +174,7 @@ struct server_task {
     // used by SERVER_TASK_TYPE_METRICS
     bool metrics_reset_bucket = false;
 
-    // used by SERVER_TASK_TYPE_DECISION: the request body
+    // used by SERVER_TASK_TYPE_DECISION: the request body; SERVER_TASK_TYPE_SYSTEMONE: questions, rendered state, debug
     json decision_request;
 
     // used by SERVER_TASK_TYPE_SET_LORA

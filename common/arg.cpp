@@ -3038,6 +3038,33 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_TAGS"));
     add_opt(common_arg(
+        {"--model-description"}, "STRING",
+        "model description for GET /v1/models (default: GGUF general.description)",
+        [](common_params & params, const std::string & value) {
+            params.model_description = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_MODEL_DESCRIPTION"));
+    add_opt(common_arg(
+        {"--model-release-date"}, "YYYY-MM-DD",
+        "model release date for GET /v1/models (default: date of the model file)",
+        [](common_params & params, const std::string & value) {
+            if (value.size() != 10 || value[4] != '-' || value[7] != '-') {
+                throw std::invalid_argument("--model-release-date must be YYYY-MM-DD");
+            }
+            params.model_release_date = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_MODEL_RELEASE_DATE"));
+    add_opt(common_arg(
+        {"--systemone-confidence"}, "MODE",
+        string_format("confidence reported by /v1/systemone: entropy (1 - normalised entropy) or max (highest probability) (default: %s)", params.systemone_confidence.c_str()),
+        [](common_params & params, const std::string & value) {
+            if (value != "entropy" && value != "max") {
+                throw std::invalid_argument("--systemone-confidence must be entropy or max");
+            }
+            params.systemone_confidence = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SYSTEMONE_CONFIDENCE"));
+    add_opt(common_arg(
         {"-m", "--model"}, "FNAME",
         ex == LLAMA_EXAMPLE_EXPORT_LORA
             ? "model path from which to load base model"

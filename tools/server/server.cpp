@@ -4,6 +4,7 @@
 #include "server-cors-proxy.h"
 #include "server-stream.h"
 #include "server-tools.h"
+#include "systemone.h"
 
 #include "arg.h"
 #include "build-info.h"
@@ -80,6 +81,20 @@ static server_http_context::handler_t ex_wrapper(server_http_context::handler_t 
         } catch (const std::exception & e) {
             SRV_ERR("got another exception: %s | while handling exception: %s\n", e.what(), message.c_str());
             res->data = "Internal Server Error";
+        }
+        return res;
+    };
+}
+
+// System One clients expect FastAPI style errors: {"detail": ...} instead of {"error": {...}}
+static server_http_context::handler_t systemone_wrapper(server_http_context::handler_t func) {
+    return [func = ex_wrapper(std::move(func))](const server_http_req & req) -> server_http_res_ptr {
+        auto res = func(req);
+        if (res->status != 200 && !res->is_stream()) {
+            const json body = json::parse_no_throw(res->data);
+            if (!body.is_discarded() && body.is_object() && body.contains("error") && body.at("error").is_object()) {
+                res->data = llama_decision::systemone::error_body(json_value(body.at("error"), "message", std::string("error")));
+            }
         }
         return res;
     };
@@ -230,6 +245,18 @@ int llama_server(common_params & params, int argc, char ** argv) {
         routes.post_embeddings_oai         = models_routes->proxy_post;
         routes.post_rerank                 = models_routes->proxy_post;
         routes.post_decision               = models_routes->proxy_post;
+        // validate here too, so a bad request gets the same 422 body as from a child
+        routes.post_systemone = [proxy = models_routes->proxy_post](const server_http_req & req) -> server_http_res_ptr {
+            json body;
+            const json errs = llama_decision::systemone::parse_request(req.body, body);
+            if (!errs.empty()) {
+                auto res = std::make_unique<server_http_res>();
+                res->status = 422;
+                res->data   = llama_decision::systemone::error_body(errs);
+                return res;
+            }
+            return proxy(req);
+        };
         routes.post_tokenize               = models_routes->proxy_post;
         routes.post_detokenize             = models_routes->proxy_post;
         routes.post_apply_template         = models_routes->proxy_post;
@@ -279,6 +306,7 @@ int llama_server(common_params & params, int argc, char ** argv) {
     ctx_http.post("/v1/reranking",             ex_wrapper(routes.post_rerank));
     ctx_http.post("/decision",                 ex_wrapper(routes.post_decision));
     ctx_http.post("/v1/decision",              ex_wrapper(routes.post_decision));
+    ctx_http.post("/v1/systemone",             systemone_wrapper(routes.post_systemone));
     ctx_http.post("/tokenize",                 ex_wrapper(routes.post_tokenize));
     ctx_http.post("/detokenize",               ex_wrapper(routes.post_detokenize));
     ctx_http.post("/apply-template",           ex_wrapper(routes.post_apply_template));

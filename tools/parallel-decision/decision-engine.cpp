@@ -346,7 +346,7 @@ batch_result engine::decide_batch(const std::string & shared_text, const std::ve
         std::vector<tokens_t> paths;
         if (opt.split_boundary) {
             for (const auto & c : in.candidates) {
-                paths.push_back(tokenize(c + "\n", false));
+                paths.push_back(tokenize(c + in.terminator, false));
             }
             suffix = tokenize(in.suffix, false);
         } else {
@@ -355,7 +355,7 @@ batch_result engine::decide_batch(const std::string & shared_text, const std::ve
             // would write itself (e.g. `":` then ` true`, not `": ` then `true`).
             std::vector<tokens_t> seqs;
             for (const auto & c : in.candidates) {
-                seqs.push_back(tokenize(in.suffix + c + "\n", false));
+                seqs.push_back(tokenize(in.suffix + c + in.terminator, false));
             }
             size_t common = seqs[0].size();
             for (const auto & s : seqs) {
@@ -635,21 +635,7 @@ compiled_schema compile_schema(const common_json & schema, const std::string & i
 
     std::string catalog;
     for (const auto & f : cs.specs) {
-        // the value's common leading characters are fixed in the suffix; only the rest is scored
-        std::string common = f.encoded[0];
-        for (const auto & v : f.encoded) {
-            size_t c = 0;
-            while (c < std::min(common.size(), v.size()) && common[c] == v[c]) {
-                ++c;
-            }
-            common.resize(c);
-        }
-        field_input in;
-        in.suffix = "  " + json_text(f.name) + ": " + common;
-        for (const auto & v : f.encoded) {
-            in.candidates.push_back(v.substr(common.size()));
-        }
-        cs.inputs.push_back(in);
+        cs.inputs.push_back(make_input(f));
 
         std::string allowed;
         for (size_t i = 0; i < f.encoded.size(); ++i) {
@@ -661,6 +647,25 @@ compiled_schema compile_schema(const common_json & schema, const std::string & i
     cs.system_text = "Select the requested field value from its allowed values, based on the context. "
                      "Respond with the JSON value only.\n\nFields:\n" + catalog + "\n" + instructions;
     return cs;
+}
+
+field_input make_input(const field_spec & f, const std::string & terminator) {
+    // the value's common leading characters are fixed in the suffix; only the rest is scored
+    std::string common = f.encoded[0];
+    for (const auto & v : f.encoded) {
+        size_t c = 0;
+        while (c < std::min(common.size(), v.size()) && common[c] == v[c]) {
+            ++c;
+        }
+        common.resize(c);
+    }
+    field_input in;
+    in.suffix     = "  " + json_text(f.name) + ": " + common;
+    in.terminator = terminator;
+    for (const auto & v : f.encoded) {
+        in.candidates.push_back(v.substr(common.size()));
+    }
+    return in;
 }
 
 std::pair<std::string, std::string> render_prompt(const common_chat_templates * tmpls, bool use_jinja,

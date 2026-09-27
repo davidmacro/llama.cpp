@@ -3,6 +3,7 @@
 #include "server-models.h"
 #include "server-context.h"
 #include "server-stream.h"
+#include "systemone.h"
 
 #include "build-info.h"
 #include "preset.h"
@@ -2015,6 +2016,7 @@ void server_models_routes::init_routes() {
         }
         auto res = std::make_unique<server_http_res>();
         json models_json = json::array();
+        json systemone_models = json::array();
         auto all_models = models.get_all_meta();
         std::time_t t = std::time(0);
         for (const auto & meta : all_models) {
@@ -2076,8 +2078,37 @@ void server_models_routes::init_routes() {
                 }
             }
             models_json.push_back(model_info);
+
+            // System One: one entry per name and alias, from the running child or the preset
+            std::string description = json_value(model_info, "description", std::string());
+            std::string release     = json_value(model_info, "release_date", std::string());
+            std::string model_path;
+            if (description.empty() && !meta.preset.get_option("LLAMA_ARG_MODEL_DESCRIPTION", description)) {
+                description = "Local llama.cpp model";
+            }
+            if (release.empty() && !meta.preset.get_option("LLAMA_ARG_MODEL_RELEASE_DATE", release)) {
+                meta.preset.get_option("LLAMA_ARG_MODEL", model_path);
+                release = llama_decision::systemone::file_date(model_path);
+            }
+            if (release.empty()) {
+                release = "1970-01-01";
+            }
+            std::vector<std::string> names = { meta.name };
+            for (const auto & alias : meta.aliases) {
+                if (alias != meta.name) {
+                    names.push_back(alias);
+                }
+            }
+            for (const auto & name : names) {
+                systemone_models.push_back({
+                    {"name",         name},
+                    {"description",  description},
+                    {"release_date", release},
+                });
+            }
         }
         res_ok(res, {
+            {"models", systemone_models},
             {"data", models_json},
             {"object", "list"},
         });

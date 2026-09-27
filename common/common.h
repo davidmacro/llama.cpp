@@ -507,6 +507,9 @@ struct common_params {
 
     std::set<std::string> model_alias;     // model aliases                                                 // NOLINT
     std::set<std::string> model_tags;      // model tags (informational, not used for routing)              // NOLINT
+    std::string model_description;         // shown by GET /v1/models (System One)                          // NOLINT
+    std::string model_release_date;        // YYYY-MM-DD, shown by GET /v1/models (System One)              // NOLINT
+    std::string systemone_confidence = "entropy"; // /v1/systemone confidence: entropy or max           // NOLINT
     std::string hf_token             = ""; // HF token (aka bearer token)                                   // NOLINT
     std::string prompt               = "";                                                                  // NOLINT
     std::string system_prompt        = "";                                                                  // NOLINT

@@ -17,6 +17,7 @@
 #include "mtmd.h"
 #include "mtmd-helper.h"
 #include "decision-engine.h"
+#include "systemone.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -934,6 +935,8 @@ private:
 
     std::string model_name; // name of the loaded model, to be used by API
     std::set<std::string> model_aliases; // additional names for the model
+    std::string model_description;       // GET /v1/models (System One)
+    std::string model_release_date;      // GET /v1/models (System One), YYYY-MM-DD
     std::set<std::string> model_tags;    // informational tags
 
     bool sleeping = false;
@@ -1387,6 +1390,24 @@ private:
 
         model_aliases = params_base.model_alias;
         model_tags    = params_base.model_tags;
+
+        // System One model metadata: explicit option, else GGUF / file date
+        model_description = params_base.model_description;
+        if (model_description.empty()) {
+            char buf[1024];
+            if (llama_model_meta_val_str(model_tgt, "general.description", buf, sizeof(buf)) > 0) {
+                model_description = buf;
+            } else {
+                model_description = "Local llama.cpp model";
+            }
+        }
+        model_release_date = params_base.model_release_date;
+        if (model_release_date.empty()) {
+            model_release_date = llama_decision::systemone::file_date(params_base.model.path);
+        }
+        if (model_release_date.empty()) {
+            model_release_date = "1970-01-01";
+        }
 
         // propagate new defaults back to caller
         params = params_base;
@@ -2452,6 +2473,109 @@ private:
         return out;
     }
 
+    // POST /v1/systemone: tasks wait here until the queue is drained, then requests with the same
+    // questions are scored together in one decide_batch (one cached prefix, one set of decodes)
+    std::vector<server_task> pending_systemone;
+
+    void process_pending_systemone() {
+        if (pending_systemone.empty()) {
+            return;
+        }
+        std::vector<server_task> tasks = std::move(pending_systemone);
+        pending_systemone.clear();
+
+        std::vector<std::string> keys;
+        for (const auto & t : tasks) {
+            keys.push_back(t.decision_request.at("questions").dump());
+        }
+        std::vector<bool> taken(tasks.size(), false);
+        for (size_t i = 0; i < tasks.size(); ++i) {
+            if (taken[i]) {
+                continue;
+            }
+            std::vector<size_t> group;
+            for (size_t j = i; j < tasks.size() && group.size() < 256; ++j) {
+                if (!taken[j] && keys[j] == keys[i]) {
+                    group.push_back(j);
+                    taken[j] = true;
+                }
+            }
+            try {
+                handle_systemone(tasks, group);
+            } catch (const std::invalid_argument & e) {
+                for (size_t j : group) {
+                    send_error(tasks[j], e.what(), ERROR_TYPE_INVALID_REQUEST);
+                }
+            } catch (const std::exception & e) {
+                for (size_t j : group) {
+                    send_error(tasks[j], e.what(), ERROR_TYPE_SERVER);
+                }
+            }
+        }
+    }
+
+    // tasks in group carry validated {"questions", "state" (rendered), "debug"}; all share the questions
+    void handle_systemone(const std::vector<server_task> & tasks, const std::vector<size_t> & group) {
+        namespace so = llama_decision::systemone;
+        if (params_base.n_seq_decision < 3) {
+            throw std::runtime_error("System One is disabled: start the server with --decision-seqs N (N >= 3)");
+        }
+        if (!decision_engine) {
+            decision_engine = std::make_unique<llama_decision::engine>(ctx_tgt, (llama_seq_id) params_base.n_parallel,
+                                                                        params_base.n_seq_decision);
+        }
+        const json & questions = tasks[group[0]].decision_request.at("questions");
+        const auto   cs        = so::compile(questions);
+
+        std::string shared;
+        std::vector<std::string> dynamic;
+        for (size_t j : group) {
+            const std::string state = tasks[j].decision_request.at("state").get<std::string>();
+            auto [head, tail] = llama_decision::render_prompt(chat_params.tmpls.get(), chat_params.use_jinja, cs.system_text, state);
+            if (dynamic.empty()) {
+                shared = head;
+            } else if (head != shared) {
+                throw std::runtime_error("the chat template renders a different prefix per state");
+            }
+            dynamic.push_back(tail);
+        }
+
+        llama_decision::options opt;
+        opt.mode = "tree"; // every answer needs the full distribution
+        const auto b    = decision_engine->decide_batch(shared, dynamic, cs.inputs, opt);
+        const auto mode = so::parse_confidence(params_base.systemone_confidence);
+
+        for (size_t k = 0; k < group.size(); ++k) {
+            const auto & task = tasks[group[k]];
+            const auto & item = b.items[k];
+            json out = json::object();
+            out["model"]   = model_name;
+            out["answers"] = so::answers(questions, item, mode);
+            // input: the whole rendered prompt, cached or not; output: one answer per question
+            out["usage"]   = {
+                { "input_tokens",  (long long) (b.shared_tokens + item.context_tokens) },
+                { "output_tokens", (long long) questions.size() },
+            };
+            if (task.decision_request.value("debug", false)) {
+                out["x_debug"] = {
+                    { "batch_size",     (long long) group.size() },
+                    { "cache_hit",      b.cache_hit },
+                    { "shared_tokens",  (long long) b.shared_tokens },
+                    { "context_tokens", (long long) item.context_tokens },
+                    { "scored_rows",    item.rows },
+                    { "rounds",         b.rounds },
+                    { "prefill_ms",     b.prefill_ms },
+                    { "scoring_ms",     b.scoring_ms },
+                    { "system_prompt",  cs.system_text },
+                };
+            }
+            auto res  = std::make_unique<server_task_result_decision>();
+            res->id   = task.id;
+            res->data = out;
+            queue_results.send(std::move(res));
+        }
+    }
+
     bool process_single_task(server_task && task, bool is_yielding) {
         // while yielding, an encode / decode is running and only reading the server state is safe
         if (is_yielding && task.type != SERVER_TASK_TYPE_METRICS && task.type != SERVER_TASK_TYPE_SLOT_GET) {
@@ -2577,6 +2701,11 @@ private:
             case SERVER_TASK_TYPE_NEXT_RESPONSE:
                 {
                     // do nothing
+                } break;
+            case SERVER_TASK_TYPE_SYSTEMONE:
+                {
+                    // scored in update_slots(), together with the others that arrive meanwhile
+                    pending_systemone.push_back(std::move(task));
                 } break;
             case SERVER_TASK_TYPE_DECISION:
                 {
@@ -2898,6 +3027,8 @@ private:
             SRV_INF("avg t_sampl       = %f ms\n", (double) t_sampl / n_sampl / 1000.0);
         }
 #endif
+
+        process_pending_systemone();
 
         // check if all slots are idle
         {
@@ -4287,6 +4418,8 @@ server_context_meta server_context::get_meta() const {
         /* model_aliases          */ impl->model_aliases,
         /* model_tags             */ impl->model_tags,
         /* model_path             */ impl->params_base.model.path,
+        /* model_description      */ impl->model_description,
+        /* model_release_date     */ impl->model_release_date,
         /* has_mtmd               */ impl->mctx != nullptr,
         /* has_inp_image          */ impl->chat_params.allow_image,
         /* has_inp_audio          */ impl->chat_params.allow_audio,
@@ -4645,6 +4778,8 @@ static json get_res_model_info(const server_context_meta & meta) {
         {"object",   "model"},
         {"created",  std::time(0)},
         {"owned_by", "llamacpp"},
+        {"description",  meta.model_description},  // System One, also read by the router
+        {"release_date", meta.model_release_date},
         {"meta",     {
             {"vocab_type",  meta.model_vocab_type},
             {"n_vocab",     meta.model_vocab_n_tokens},
@@ -4661,29 +4796,39 @@ static json get_res_model_info(const server_context_meta & meta) {
 static json get_res_models(const server_context_meta & meta) {
     // note: do NOT use ctx_server here, otherwise it's not possible to use this during sleep
 
+    // one entry per name and alias; name, description and release_date are the System One fields
+    auto entry = [&](const std::string & name) {
+        return json{
+            {"name",  name},
+            {"model", name},
+            {"modified_at", ""},
+            {"size", ""},
+            {"digest", ""}, // dummy value, llama.cpp does not support managing model file's hash
+            {"type", "model"},
+            {"description", meta.model_description},
+            {"release_date", meta.model_release_date},
+            {"tags", json::array({""})},
+            {"capabilities", meta.has_mtmd ? json::array({"completion","multimodal"}) : json::array({"completion"})},
+            {"parameters", ""},
+            {"details", {
+                {"parent_model", ""},
+                {"format", "gguf"},
+                {"family", ""},
+                {"families", json::array({""})},
+                {"parameter_size", ""},
+                {"quantization_level", ""}
+            }}
+        };
+    };
+    json models = json::array({ entry(meta.model_name) });
+    for (const auto & alias : meta.model_aliases) {
+        if (alias != meta.model_name) {
+            models.push_back(entry(alias));
+        }
+    }
+
     return json{
-        {"models", json::array({
-            {
-                {"name",  meta.model_name},
-                {"model", meta.model_name},
-                {"modified_at", ""},
-                {"size", ""},
-                {"digest", ""}, // dummy value, llama.cpp does not support managing model file's hash
-                {"type", "model"},
-                {"description", ""},
-                {"tags", json::array({""})},
-                {"capabilities", meta.has_mtmd ? json::array({"completion","multimodal"}) : json::array({"completion"})},
-                {"parameters", ""},
-                {"details", {
-                    {"parent_model", ""},
-                    {"format", "gguf"},
-                    {"family", ""},
-                    {"families", json::array({""})},
-                    {"parameter_size", ""},
-                    {"quantization_level", ""}
-                }}
-            }
-        })},
+        {"models", models},
         {"object", "list"},
         {"data", json::array({
             get_res_model_info(meta),
@@ -5254,6 +5399,55 @@ void server_routes::init_routes() {
         }
         if (result->is_error()) {
             res->error(result->to_json());
+            return res;
+        }
+        res->ok(result->to_json());
+        return res;
+    };
+
+    // POST /v1/systemone: TypeSafe System One wire format (see tools/parallel-decision/systemone.h)
+    this->post_systemone = [this](const server_http_req & req) {
+        namespace so = llama_decision::systemone;
+        auto res = create_response();
+        auto fail = [&](int status, const json & detail) {
+            res->status = status;
+            res->data   = so::error_body(detail);
+        };
+
+        json body;
+        const json errs = so::parse_request(req.body, body);
+        if (!errs.empty()) {
+            fail(422, errs);
+            return res;
+        }
+        const std::string model = body.at("model").get<std::string>();
+        if (model != meta->model_name && meta->model_aliases.count(model) == 0) {
+            fail(404, "Model '" + model + "' not found; available: " + meta->model_name);
+            return res;
+        }
+        if (params.n_seq_decision < 3) {
+            fail(503, "System One is disabled: start the server with --decision-seqs N (N >= 3)");
+            return res;
+        }
+
+        json data = json::object();
+        data["questions"] = body.at("questions");
+        data["state"]     = so::render_state(body.at("state"));
+        const std::string debug = req.get_param("debug");
+        data["debug"]     = debug == "1" || debug == "true";
+
+        server_task task(SERVER_TASK_TYPE_SYSTEMONE);
+        task.id               = res->rd.get_new_id();
+        task.decision_request = data;
+        res->rd.post_task(std::move(task));
+
+        auto result = res->rd.next([&] { return req.should_stop(); });
+        if (!result) {
+            return res; // the client went away
+        }
+        if (result->is_error()) {
+            const json e = result->to_json();
+            fail(json_value(e, "code", 500), json_value(e, "message", std::string("error")));
             return res;
         }
         res->ok(result->to_json());

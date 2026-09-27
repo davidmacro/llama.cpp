@@ -27,6 +27,7 @@ using tokens_t = std::vector<llama_token>;
 struct field_input {
     std::string              suffix;     // e.g.  '  "fire": '
     std::vector<std::string> candidates; // allowed values, with the suffix's shared prefix removed
+    std::string              terminator = "\n"; // text the model writes after a value; ends each path
 };
 
 struct options {
@@ -130,6 +131,9 @@ struct compiled_schema {
 // Accepts compact field specs {"name": {"type": ..., "description": ..., ...}} or a JSON Schema
 // object with "properties" (boolean, string+enum, integer min/max, number min/max/multipleOf).
 compiled_schema compile_schema(const common_json & schema, const std::string & instructions);
+
+// The scorer input of one field: '  "name": ' plus the values' shared leading characters, then the rest of each value.
+field_input make_input(const field_spec & f, const std::string & terminator = "\n");
 
 // Renders system + user messages with the model's chat template (thinking disabled) and splits
 // the prompt into the static prefix (cached across requests) and the per-request part: the
