@@ -2568,6 +2568,20 @@ private:
                     { "scoring_ms",     b.scoring_ms },
                     { "system_prompt",  cs.system_text },
                 };
+                // the exact text the engine tokenizes: prefix (cached) + state part, then per question
+                // the suffix after which it scores and the allowed continuations (each + terminator)
+                json fields = json::array();
+                for (size_t f = 0; f < cs.inputs.size(); ++f) {
+                    fields.push_back({
+                        { "question",   cs.specs[f].name },
+                        { "suffix",     cs.inputs[f].suffix },
+                        { "candidates", cs.inputs[f].candidates },
+                        { "terminator", cs.inputs[f].terminator },
+                    });
+                }
+                out["x_debug"]["prompt_prefix"] = shared;
+                out["x_debug"]["prompt_state"]  = dynamic[k];
+                out["x_debug"]["fields"]        = fields;
             }
             auto res  = std::make_unique<server_task_result_decision>();
             res->id   = task.id;

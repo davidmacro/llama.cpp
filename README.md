@@ -166,7 +166,7 @@ These extend the official schema and are opt-in.
 
   On Gemma 4 E4B, names scored as well as codes or better, and clearly better for bare option names; codes
   matched names only for opaque keys. Use `letters` for ids, long codes or awkward keys.
-- **`?debug=1`** adds `x_debug` to the response: timings, batch size, cache hit, scored rows and the system prompt.
+- **`?debug=1`** adds `x_debug` to the response: timings, batch size, cache hit, scored rows, the system prompt, the full rendered prompt (`prompt_prefix` + `prompt_state`) and per question the text it is scored after and its candidates (`fields`).
 
 ### `GET /v1/models`
 
