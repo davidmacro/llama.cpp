@@ -1,20 +1,35 @@
 # llama.cpp - System One
 
-A fork of [llama.cpp](https://github.com/ggml-org/llama.cpp) whose `llama-server` natively serves TypeSafe AI's
-[System One](https://api.typesafe.ai/docs) API: `POST /v1/systemone` and `GET /v1/models`, wire-compatible with the
-official [OpenAPI](https://api.typesafe.ai/openapi.json). The official SDKs work against a local GGUF model by changing
-only the base URL. No adapter or proxy runs in front of the server.
+A fork of [llama.cpp](https://github.com/ggml-org/llama.cpp) whose `llama-server` serves TypeSafe AI's
+[System One](https://api.typesafe.ai/docs) API itself: `POST /v1/systemone` and `GET /v1/models`, following the
+official [OpenAPI](https://api.typesafe.ai/openapi.json). One process handles HTTP, validation, prompt caching and
+scoring. The official SDKs talk to a local GGUF model; only the base URL changes.
 
-> Wire-compatible does not mean behaviour-compatible. A local model gives System One-*style* answers: its
-> classifications, probabilities and confidence differ from TypeSafe's hosted Jev models, and are not calibrated
-> the same way.
+> The wire format matches; the answers come from your local model. Its classifications, probabilities and
+> confidence differ from TypeSafe's hosted Jev models and have their own calibration.
 
 Branch `systemone`. The upstream llama.cpp README is kept as [README-llama.cpp.md](README-llama.cpp.md).
 
+## Native: System One inside the inference server
+
+Other open-source System One implementations for llama.cpp, such as
+[llamacpp-jev](https://github.com/NakliTechie/llamacpp-jev) and [jev-bridge](https://github.com/TOSUKUi/jev-bridge),
+run as adapters in front of an inference server and read answer probabilities through its HTTP API. Here the endpoint
+is part of `llama-server`, and scoring runs inside the decode loop with direct access to the logits:
+
+- **One process, one hop.** A request goes from the client straight to the model and back. Validation, prompt caching
+  and scoring share the server's memory and the model's KV cache.
+- **Complete distributions.** Every allowed value is scored from the raw logits, including options that span several
+  tokens, so `probabilities` covers all options exactly. Adapters read label probabilities from the server's logprobs
+  output, which lists the top-k tokens at one position.
+- **All questions in one forward pass.** Questions run as parallel branches of one cached prompt, and concurrent
+  requests with the same questions are batched together.
+- **One deployment.** The same server, API keys, router and model presets also serve chat completions and embeddings:
+  one binary to deploy, configure and upgrade.
+
 ## Built on parallel-decision by thecodacus
 
-The core of this fork is not ours. It is the **parallel decision engine** by
-[thecodacus](https://github.com/thecodacus), from the
+The core of this fork is the **parallel decision engine** by [thecodacus](https://github.com/thecodacus), from the
 [`parallel-decision`](https://github.com/thecodacus/llama.cpp/tree/parallel-decision) branch of
 [thecodacus/llama.cpp](https://github.com/thecodacus/llama.cpp). This branch starts from that branch unchanged
 (commit `ad129b08d`) and adds System One on top.
@@ -29,16 +44,16 @@ thecodacus designed and built:
 - single-pass scoring for hybrid and recurrent models (`ad129b08d`);
 - [decision-playground](https://github.com/thecodacus/decision-playground), a browser UI for the endpoint.
 
-What this fork adds: the System One wire format (`/v1/systemone`, validation, `/v1/models` fields, router support),
+This fork adds the System One wire format (`/v1/systemone`, validation, `/v1/models` fields, router support),
 request coalescing, the `x_labels` extension, two small engine changes (a per-field terminator and `make_input()`), and
 the tests and measurements below. The speed and exact probabilities described here come from thecodacus's engine.
 
 ## How it works
 
-Every question has a finite set of allowed answers. Instead of generating JSON token by token, the server scores all
-allowed answers of all questions in one batched forward pass, forked from one cached prompt, using thecodacus's parallel
-decision engine in [tools/parallel-decision](tools/parallel-decision). Each answer comes with the exact probability
-distribution over its allowed values, normalised over those values only (no top-k truncation).
+Every question has a finite set of allowed answers. The server scores all allowed answers of all questions in one
+batched forward pass, forked from one cached prompt, using thecodacus's parallel decision engine in
+[tools/parallel-decision](tools/parallel-decision). Each answer carries the exact probability distribution over its
+allowed values, normalised over those values only.
 
 | Question | Scored values | Answer |
 |---|---|---|
@@ -129,8 +144,8 @@ Request and response follow the official schema: `model`, `state` (string, objec
 |---|---|
 | `model` | The model name or any `--alias` (e.g. `-a jev-latest`). The response names the model that answered. Unknown model: 404. |
 | Nested JSON | Allowed wherever the schema allows objects or arrays: `state`, `instructions`, criteria descriptions. `legend` returns the criteria as sent. |
-| `confidence` | `--systemone-confidence entropy` (default: 1 - normalised entropy) or `max` (highest probability). Not TypeSafe's calibrated confidence. |
-| `usage` | `input_tokens` = the whole rendered prompt, cached or not; `output_tokens` = the number of questions. |
+| `confidence` | `--systemone-confidence entropy` (default: 1 - normalised entropy) or `max` (highest probability). A local, uncalibrated statistic. |
+| `usage` | `input_tokens` = the whole rendered prompt, cached tokens included; `output_tokens` = the number of questions. |
 | Validation | 422 `{"detail": [{"type", "loc", "msg", "input", "ctx"}]}` in FastAPI / pydantic form. Types, `loc` and messages were checked against pydantic run on the official SDK's generated schemas. |
 | Other errors | `{"detail": "..."}`: 404 unknown model, 503 when `--decision-seqs` is missing, 401 with `--api-key` and a bad or missing key. |
 | Limits (local policy) | At most 32 questions and 255 options or levels per question (422 `value_error`). |
@@ -138,7 +153,7 @@ Request and response follow the official schema: `model`, `state` (string, objec
 
 ### Extensions
 
-These are not part of the official schema and are off unless requested.
+These extend the official schema and are opt-in.
 
 - **`x_labels`** on a `choice` question: `"names"` (default: the model writes the option name), `"letters"` (`A`..`Z`,
   at most 26 options) or `"numbers"` (`1`..`N`). With codes the prompt lists `- "A" = "billing": ...` and the model
@@ -149,15 +164,15 @@ These are not part of the official schema and are off unless requested.
   "topic":    {"type": "choice", "x_labels": "letters", "criteria": {"q7mz": "Billing", "t1x9": "Technical"}}
   ```
 
-  Measured on Gemma 4 E4B, names were never clearly worse and were better when options have no description; codes only
-  matched names for opaque keys such as ids. Use `letters` for ids, long codes or awkward keys.
+  On Gemma 4 E4B, names scored as well as codes or better, and clearly better for bare option names; codes
+  matched names only for opaque keys. Use `letters` for ids, long codes or awkward keys.
 - **`?debug=1`** adds `x_debug` to the response: timings, batch size, cache hit, scored rows and the system prompt.
 
 ### `GET /v1/models`
 
 Returns `models[]` with `name`, `description` and `release_date` (`YYYY-MM-DD`), one entry per model name and alias.
 The values come from `--model-description` and `--model-release-date`, or else from the GGUF `general.description`
-and the model file's date. The OpenAI-style `data[]` list is kept alongside, so OpenAI clients still work.
+and the model file's date. The OpenAI-style `data[]` list stays alongside for OpenAI clients.
 
 ### Router mode
 
@@ -186,14 +201,14 @@ Gemma 4 E4B QAT (Q4_K_XL) on one RTX PRO 6000, 5 questions, 304 cached prompt to
 | Case | Result |
 |---|---|
 | Warm request | 30 ms |
-| New question set (prompt not cached) | 72 ms |
+| New question set (cold prompt) | 72 ms |
 | 16 concurrent clients | about 110 requests/s |
 | 64 concurrent clients | about 120 requests/s |
 
 ## Quality
 
-A small, hand-labelled smoke test (not a comparison with hosted Jev): on 40 support tickets, department (4-way choice)
-is 95% correct and refund (noul) 97%; urgency (4-level score) is off by 0.48 levels on average.
+A smoke test on 40 support tickets, labelled by the fork author: department (4-way choice) is 95% correct and refund
+(noul) 97%; urgency (4-level score) is off by 0.48 levels on average.
 
 ## Tests
 
@@ -206,14 +221,16 @@ LLAMA_SERVER_BIN_PATH=../../../build/bin/llama-server pytest unit/test_systemone
 [test_systemone.py](tools/server/tests/unit/test_systemone.py) checks every response against a vendored copy of the
 official OpenAPI ([fixtures/systemone-openapi.json](tools/server/tests/fixtures/systemone-openapi.json)) and covers
 validation errors, `/v1/models`, auth, concurrency, router mode, `x_labels` and the official SDK. The test harness
-downloads a tiny model, so the build needs HTTPS: OpenSSL, or `-DLLAMA_BUILD_BORINGSSL=ON` if OpenSSL is not installed.
+downloads a tiny model, so the build needs HTTPS: build with OpenSSL, or with `-DLLAMA_BUILD_BORINGSSL=ON` to fetch
+BoringSSL.
 
-## Not supported
+## Limitations
 
-- Multimodal `state` (images or message parts): arrays are treated as plain JSON.
-- Answers that are objects: each question has one `noul`, `choice` or `score` answer. Use one question per field.
-- Streaming (the official API has none either).
-- Hosted-model parity: errors and answers have not been compared with the hosted API.
+- A multimodal `state` (images, message parts) is read as plain JSON.
+- Each question has one `noul`, `choice` or `score` answer. For structured output, ask one question per field.
+- Responses arrive in one piece, as in the official API.
+- Errors and answers are checked against the OpenAPI and the official SDK; a comparison with the hosted API is still
+  open.
 
 ## Code
 
@@ -230,6 +247,6 @@ downloads a tiny model, so the build needs HTTPS: OpenSSL, or `-DLLAMA_BUILD_BOR
   [thecodacus/llama.cpp @ parallel-decision](https://github.com/thecodacus/llama.cpp/tree/parallel-decision). See
   [Built on parallel-decision by thecodacus](#built-on-parallel-decision-by-thecodacus).
 - **llama.cpp:** [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) and its contributors.
-- **System One API:** [TypeSafe AI](https://typesafe.ai). This project is not affiliated with TypeSafe AI.
+- **System One API:** [TypeSafe AI](https://typesafe.ai). This fork is independent of TypeSafe AI.
 
 MIT license, see [LICENSE](LICENSE). Commit history keeps each author's work under their own name.
