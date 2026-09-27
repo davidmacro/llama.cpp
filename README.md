@@ -166,13 +166,19 @@ These extend the official schema and are opt-in.
 
   On Gemma 4 E4B, names scored as well as codes or better, and clearly better for bare option names; codes
   matched names only for opaque keys. Use `letters` for ids, long codes or awkward keys.
-- **`x_layout`** on the request: `"questions-first"` (default) or `"state-first"`. Questions-first puts all questions
-  in one system prompt that is cached across requests, and scores each question as the first key of the JSON answer.
-  State-first puts the state in the user turn and gives each question its own branch holding only that question, as
-  llamacpp-jev and openjev-sglang lay it out; all branches still score in one batched pass. The server default is set
-  with `--systemone-layout`. On Gemma 4 12B, state-first raised language accuracy from 0.83 to 0.98 and lowered
-  department accuracy from 0.91 to 0.78, at 71 ms instead of 49 ms per ticket: the other questions help department
-  routing and hurt language detection.
+- **`x_layout`** on the request (server default: `--systemone-layout`), one of four prompt layouts. All of them score
+  every question in one batched pass; they differ in what the model sees before each answer.
+
+  | Layout | What each question sees | Gemma 4 12B: department / language | Per ticket |
+  |---|---|---|---|
+  | `questions-first` (default) | all questions in one cached system prompt; answered as the first key of one JSON object | **0.905** / 0.832 | **49 ms** |
+  | `catalog` | the same, answered as `{"question": name, "answer": value}`; option keys shared between questions written as `"language.other"` | 0.895 / 0.918 | 50 ms |
+  | `state-first` | the state, then only its own question (as llamacpp-jev lays it out) | 0.780 / **0.983** | 71 ms |
+  | `state-first-context` | as `state-first`, plus one line naming the other questions | 0.808 / **0.982** | 115 ms |
+
+  Seeing the other questions helps department routing (a separate refund question keeps refund requests out of
+  "billing") and hurts language detection (shared option keys and answer positions). `catalog` keeps the first and
+  removes most of the second; the state-first layouts detect language best.
 - **`?debug=1`** adds `x_debug` to the response: timings, batch size, cache hit, scored rows, the system prompt, the full rendered prompt (`prompt_prefix` + `prompt_state`) and per question the text it is scored after and its candidates (`fields`).
 
 ### `GET /v1/models`

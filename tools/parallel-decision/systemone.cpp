@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <map>
 #include <cmath>
 #include <ctime>
 #include <stdexcept>
@@ -273,9 +274,18 @@ common_json validate(const common_json & body) {
     // extension: prompt layout for this request (see layout)
     if (body.contains("x_layout")) {
         const common_json & v = body.at("x_layout");
-        if (!v.is_string() || (v.get<std::string>() != "questions-first" && v.get<std::string>() != "state-first")) {
-            errs.add(at_key(root, "x_layout"), "literal_error", "Input should be 'questions-first' or 'state-first'", v,
-                     common_json{ { "expected", "'questions-first' or 'state-first'" } });
+        bool known = false;
+        if (v.is_string()) {
+            try {
+                parse_layout(v.get<std::string>());
+                known = true;
+            } catch (const std::invalid_argument &) {
+            }
+        }
+        if (!known) {
+            const char * expected = "'questions-first', 'catalog', 'state-first' or 'state-first-context'";
+            errs.add(at_key(root, "x_layout"), "literal_error", std::string("Input should be ") + expected, v,
+                     common_json{ { "expected", expected } });
         }
     }
     return errs.list;
@@ -315,7 +325,17 @@ std::string render_state(const common_json & state) {
 namespace {
 
 // Engine fields and one text block per question ('"name" (kind)', instructions, allowed answers).
-compiled_schema compile_blocks(const common_json & questions, const std::string & terminator, std::vector<std::string> & blocks) {
+// scope_shared_keys: a choice key that also appears in another choice question is written as "question.key".
+compiled_schema compile_blocks(const common_json & questions, const std::string & terminator, std::vector<std::string> & blocks,
+                               bool scope_shared_keys = false) {
+    std::map<std::string, int> key_uses;
+    for (const auto & [name, q] : questions.items()) {
+        if (q.at("type").get<std::string>() == "choice") {
+            for (const auto & [key, val] : q.at("criteria").items()) {
+                key_uses[key] += 1;
+            }
+        }
+    }
     compiled_schema cs;
     for (const auto & [name, q] : questions.items()) {
         const std::string type = q.at("type").get<std::string>();
@@ -340,14 +360,15 @@ compiled_schema compile_blocks(const common_json & questions, const std::string 
             f.type = "enum";
             size_t k = 0;
             for (const auto & [key, val] : q.at("criteria").items()) {
-                const std::string desc = text_of(val);
-                const std::string code = labels == "letters" ? json_text(std::string(1, (char) ('A' + k)))
-                                       : labels == "numbers" ? std::to_string(k + 1)
-                                       : json_text(key);
+                const std::string desc  = text_of(val);
+                const std::string shown = scope_shared_keys && key_uses[key] > 1 ? name + "." + key : key;
+                const std::string code  = labels == "letters" ? json_text(std::string(1, (char) ('A' + k)))
+                                        : labels == "numbers" ? std::to_string(k + 1)
+                                        : json_text(shown);
                 f.values.push_back(common_json(key));
                 f.encoded.push_back(code);
                 allowed += (allowed.empty() ? "" : "\n") + std::string("- ") + code +
-                           (labels == "names" ? "" : " = " + json_text(key)) + (desc.empty() ? "" : ": " + desc);
+                           (labels == "names" ? "" : " = " + json_text(shown)) + (desc.empty() ? "" : ": " + desc);
                 ++k;
             }
             if (labels != "names") {
@@ -383,10 +404,16 @@ layout parse_layout(const std::string & name) {
     if (name == "questions-first") {
         return layout::questions_first;
     }
+    if (name == "catalog") {
+        return layout::catalog;
+    }
     if (name == "state-first") {
         return layout::state_first;
     }
-    throw std::invalid_argument("layout must be questions-first or state-first");
+    if (name == "state-first-context") {
+        return layout::state_first_context;
+    }
+    throw std::invalid_argument("layout must be questions-first, catalog, state-first or state-first-context");
 }
 
 compiled_schema compile(const common_json & questions) {
@@ -407,8 +434,29 @@ compiled_schema compile(const common_json & questions) {
 prompt build(const common_chat_templates * tmpls, bool use_jinja, const common_json & questions,
              const std::vector<std::string> & states, layout lay) {
     prompt out;
-    if (lay == layout::questions_first) {
-        out.cs = compile(questions);
+    if (lay == layout::questions_first || lay == layout::catalog) {
+        if (lay == layout::questions_first) {
+            out.cs = compile(questions);
+        } else {
+            // catalog: every question is answered as its own {"question": name, "answer": value}, so each branch
+            // sits where the instructions put it, and option keys shared between questions are made unique
+            std::vector<std::string> blocks;
+            out.cs = compile_blocks(questions, "\n", blocks, /*scope_shared_keys=*/ true);
+            std::string catalog;
+            for (const auto & b : blocks) {
+                catalog += "\n\n" + b;
+            }
+            out.cs.system_text = "You evaluate the content in the user message and answer the questions below one at a "
+                                 "time. Each question lists its allowed answers. Answer a question with a JSON object "
+                                 "{\"question\": <question name>, \"answer\": <one allowed answer, written exactly as "
+                                 "listed>}.\n\nQuestions:" + catalog;
+            for (size_t i = 0; i < out.cs.inputs.size(); ++i) {
+                // make_input wrote '  "name": <common start of the values>'; keep the common start
+                auto & in = out.cs.inputs[i];
+                const std::string name = json_text(out.cs.specs[i].name);
+                in.suffix = "  \"question\": " + name + ",\n  \"answer\": " + in.suffix.substr(2 + name.size() + 2);
+            }
+        }
         for (const auto & st : states) {
             auto [head, tail] = render_prompt(tmpls, use_jinja, out.cs.system_text, st);
             if (out.contexts.empty()) {
@@ -450,10 +498,24 @@ prompt build(const common_chat_templates * tmpls, bool use_jinja, const common_j
     // each branch sees only its own question and answers it as a one-key object: {"name": value}
     std::vector<std::string> blocks;
     out.cs = compile_blocks(questions, "}", blocks);
+    std::vector<std::string> briefs; // state-first-context: name and instructions of every question, no options
+    for (const auto & [name, q] : questions.items()) {
+        const std::string instr = describe(q, "instructions");
+        briefs.push_back(json_text(name) + (instr.empty() ? "" : " (" + instr + ")"));
+    }
     for (size_t i = 0; i < blocks.size(); ++i) {
+        std::string context;
+        if (lay == layout::state_first_context && blocks.size() > 1) {
+            for (size_t j = 0; j < briefs.size(); ++j) {
+                if (j != i) {
+                    context += (context.empty() ? "" : ", ") + briefs[j];
+                }
+            }
+            context = "\n\nAsked separately about the same content: " + context + ".";
+        }
         // make_input indents the key by two spaces for the multi-line object; here the key opens the object
         auto & in = out.cs.inputs[i];
-        in.suffix = blocks[i] + ending + "{" + in.suffix.substr(2);
+        in.suffix = blocks[i] + context + ending + "{" + in.suffix.substr(2);
     }
     return out;
 }

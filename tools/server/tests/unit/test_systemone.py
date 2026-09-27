@@ -413,3 +413,41 @@ def test_systemone_layout_validation():
     server.start()
     res = server.make_request("POST", "/v1/systemone", data=dict(EXAMPLE, x_layout="sideways"))
     assert [(e["type"], e["loc"]) for e in detail(res)] == [("literal_error", ["body", "x_layout"])]
+
+
+def test_systemone_catalog_layout():
+    global server
+    server.start()
+    req = {
+        "model": "tinyllama-2", "state": "hello", "x_layout": "catalog",
+        "questions": {
+            "topic": {"type": "choice", "criteria": {"billing": None, "other": None}},
+            "language": {"type": "choice", "criteria": {"EN": None, "other": None}},
+            "refund": {"type": "noul"},
+        },
+    }
+    res = server.make_request("POST", "/v1/systemone?debug=1", data=req)
+    assert res.status_code == 200, res.body
+    body = dict(res.body)
+    d = body.pop("x_debug")
+    check_answers({k: v for k, v in req.items() if k != "x_layout"}, body)
+    # a key shared by two questions is scoped in the prompt; answers keep the original keys
+    assert '"topic.other"' in d["system_prompt"] and '"language.other"' in d["system_prompt"]
+    assert list(body["answers"]["topic"]["probabilities"]) == ["billing", "other"]
+    f = {x["question"]: x for x in d["fields"]}
+    assert f["language"]["suffix"].startswith('  "question": "language",\n  "answer": ')
+    assert 'language.other"' in f["language"]["candidates"]
+
+
+def test_systemone_state_first_context_layout():
+    global server
+    server.n_batch = 512
+    server.start()
+    res = server.make_request("POST", "/v1/systemone?debug=1", data=dict(EXAMPLE, x_layout="state-first-context"))
+    assert res.status_code == 200, res.body
+    body = dict(res.body)
+    d = body.pop("x_debug")
+    check_answers(EXAMPLE, body)
+    f = {x["question"]: x for x in d["fields"]}
+    assert 'Asked separately about the same content: "department"' in f["refund_requested"]["suffix"]
+    assert "Allowed answers:\n- \"billing\"" not in f["refund_requested"]["suffix"]  # the other questions' options stay out

@@ -3066,10 +3066,10 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SYSTEMONE_CONFIDENCE"));
     add_opt(common_arg(
         {"--systemone-layout"}, "LAYOUT",
-        string_format("default /v1/systemone prompt layout: questions-first (all questions in one cached system prompt) or state-first (the state, then one branch per question) (default: %s)", params.systemone_layout.c_str()),
+        string_format("default /v1/systemone prompt layout: questions-first (all questions in one cached system prompt), catalog (the same, each question answered as its own object), state-first (the state, then one branch per question) or state-first-context (state-first naming the other questions) (default: %s)", params.systemone_layout.c_str()),
         [](common_params & params, const std::string & value) {
-            if (value != "questions-first" && value != "state-first") {
-                throw std::invalid_argument("--systemone-layout must be questions-first or state-first");
+            if (value != "questions-first" && value != "catalog" && value != "state-first" && value != "state-first-context") {
+                throw std::invalid_argument("--systemone-layout must be questions-first, catalog, state-first or state-first-context");
             }
             params.systemone_layout = value;
         }

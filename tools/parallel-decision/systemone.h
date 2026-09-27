@@ -51,11 +51,16 @@ compiled_schema compile(const common_json & questions);
 // Prompt layout (extension "x_layout", server option --systemone-layout):
 //   questions_first: all questions in the system turn (cached across requests), the state in the user turn,
 //                    each question scored as the first key of the answer object;
+//   catalog:         as questions_first, but each question is answered as {"question": name, "answer": value}
+//                    and option keys shared between questions are written as "question.key";
 //   state_first:     the state in the user turn, then per question a branch with only that question's block,
-//                    the end of the turn and '{"name": ' (as llamacpp-jev and openjev-sglang lay it out).
+//                    the end of the turn and '{"name": ' (as llamacpp-jev and openjev-sglang lay it out);
+//   state_first_context: as state_first, plus one line naming the other questions (no options).
 enum class layout {
     questions_first,
+    catalog,
     state_first,
+    state_first_context,
 };
 
 // throws std::invalid_argument for an unknown name
