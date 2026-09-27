@@ -287,6 +287,24 @@ refund tickets, which llamacpp-jev routes to billing. Language favours llamacpp-
 fork answers "other" for many Portuguese (53 of 100) and Afrikaans (31) tickets. Keying the language options by name
 (`"Portuguese"` instead of `"PT"`) lifts this fork to 0.875, letters to 0.923.
 
+### Qwen3.8-27B
+
+The same 600 tickets on Qwen3.8-27B (UD-Q5_K_XL, hybrid attention), same flags, across all layouts:
+
+| | This fork, questions-first | This fork, catalog | This fork, state-first | llamacpp-jev, 4 slots |
+|---|---|---|---|---|
+| Latency per ticket, p50 | **83 ms** | 87 ms | 205 ms | 488 ms |
+| Throughput, 16 clients | **15.3 req/s** (19.5 with `--decision-seqs 128`) | 14.0 req/s | 4.2 req/s | 2.3 req/s |
+| Department accuracy | 0.888 (0.920 with letters) | **0.902** | 0.745 | 0.763 |
+| Refund accuracy | **1.000** | **1.000** | **1.000** | **1.000** |
+| Language accuracy | **0.995** | 0.983 | 0.992 | 0.970 |
+
+On this model questions-first, the default, wins on every question and on speed: department 75 to 0 against
+llamacpp-jev (p = 5e-23), language 17 to 2 (p = 7e-4). The language weakness seen on Gemma 4 12B belongs to that
+model under the questions-first prompt; Qwen3.8-27B reads Portuguese and Afrikaans correctly in every layout.
+State-first lowers department accuracy on both Gemma 4 12B and Qwen3.8-27B, again on refund tickets that go to
+billing.
+
 ## Tests
 
 ```bash
