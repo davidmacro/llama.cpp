@@ -252,6 +252,27 @@ departments more accurately, clearly so for refund and vague tickets, and matche
 llamacpp-jev detects languages more accurately, with the difference concentrated in Afrikaans, Galician and Catalan.
 Texts and labels are by the fork author, on one model and one GPU.
 
+### Gemma 4 12B
+
+The same 600 tickets on Gemma 4 12B QAT (Q4_K_XL), every server pinned to one GPU with reasoning off
+(`--split-mode layer --tensor-split 1,0 --main-gpu 0 --reasoning off --kv-unified --cache-type-k/v q8_0`), this fork at
+`--parallel 1 --decision-seqs 12`:
+
+| | This fork | llamacpp-jev, 4 slots | llamacpp-jev, 16 slots |
+|---|---|---|---|
+| Latency per ticket, p50 | **49 ms** | 281 ms | 303 ms |
+| Throughput, 16 clients | **36 req/s** (82 with `--decision-seqs 128`) | 5.9 req/s | 7.7 req/s |
+| Throughput, 64 clients | **39 req/s** (98 with `--decision-seqs 128`) | 6.3 req/s | 6.4 req/s |
+| Department accuracy | **0.905** | 0.705 | 0.707 |
+| Refund accuracy | **0.998** | **0.998** | **0.998** |
+| Language accuracy | 0.832 | **0.975** | 0.973 |
+
+The pattern holds and sharpens. This fork is 5-6x faster per ticket, and `--decision-seqs` sets its throughput under
+load (12 sequences hold about 2-3 tickets per pass). Department favours this fork 123 to 3 (p = 8e-33), again on
+refund tickets, which llamacpp-jev routes to billing. Language favours llamacpp-jev 94 to 8 (p = 9e-20): on 12B this
+fork answers "other" for many Portuguese (53 of 100) and Afrikaans (31) tickets. Keying the language options by name
+(`"Portuguese"` instead of `"PT"`) lifts this fork to 0.875, letters to 0.923.
+
 ## Tests
 
 ```bash
