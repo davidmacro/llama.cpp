@@ -3065,6 +3065,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SYSTEMONE_CONFIDENCE"));
     add_opt(common_arg(
+        {"--systemone-layout"}, "LAYOUT",
+        string_format("default /v1/systemone prompt layout: questions-first (all questions in one cached system prompt) or state-first (the state, then one branch per question) (default: %s)", params.systemone_layout.c_str()),
+        [](common_params & params, const std::string & value) {
+            if (value != "questions-first" && value != "state-first") {
+                throw std::invalid_argument("--systemone-layout must be questions-first or state-first");
+            }
+            params.systemone_layout = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SYSTEMONE_LAYOUT"));
+    add_opt(common_arg(
         {"-m", "--model"}, "FNAME",
         ex == LLAMA_EXAMPLE_EXPORT_LORA
             ? "model path from which to load base model"

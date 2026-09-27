@@ -374,3 +374,42 @@ def test_systemone_labels_validation(question, expected):
     errs = detail(res)
     assert [e["type"] for e in errs] == [expected]
     assert errs[0]["loc"] == ["body", "questions", "q", question["type"], "x_labels"]
+
+
+def test_systemone_state_first_layout():
+    global server
+    server.n_batch = 512  # a state-first branch carries its whole question block
+    server.start()
+    req = dict(EXAMPLE, x_layout="state-first")
+    res = server.make_request("POST", "/v1/systemone?debug=1", data=req)
+    assert res.status_code == 200, res.body
+    body = dict(res.body)
+    d = body.pop("x_debug")
+    check_answers(EXAMPLE, body)
+    assert d["layout"] == "state-first"
+    assert EXAMPLE["state"] in d["prompt_state"]
+    # each branch carries only its own question and opens a one-key object
+    for f in d["fields"]:
+        others = [q for q in EXAMPLE["questions"] if q != f["question"]]
+        assert f'"{f["question"]}" (' in f["suffix"]
+        assert all(f'"{o}" (' not in f["suffix"] for o in others)
+        assert f["terminator"] == "}"
+
+
+def test_systemone_layout_server_default():
+    global server
+    server.systemone_layout = "state-first"
+    server.n_batch = 512
+    server.start()
+    res = server.make_request("POST", "/v1/systemone?debug=1", data=EXAMPLE)
+    assert res.status_code == 200, res.body
+    assert res.body["x_debug"]["layout"] == "state-first"
+    res = server.make_request("POST", "/v1/systemone?debug=1", data=dict(EXAMPLE, x_layout="questions-first"))
+    assert res.body["x_debug"]["layout"] == "questions-first"
+
+
+def test_systemone_layout_validation():
+    global server
+    server.start()
+    res = server.make_request("POST", "/v1/systemone", data=dict(EXAMPLE, x_layout="sideways"))
+    assert [(e["type"], e["loc"]) for e in detail(res)] == [("literal_error", ["body", "x_layout"])]

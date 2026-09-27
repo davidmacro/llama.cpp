@@ -269,7 +269,8 @@ std::vector<std::vector<float>> engine::score_branches(const std::vector<branch>
             ++end;
         }
         if (end == start) {
-            throw std::runtime_error("a decision suffix exceeds the batch size");
+            throw std::runtime_error("a decision branch of " + std::to_string(branches[order[start]].toks.size()) +
+                                     " tokens exceeds the batch size of " + std::to_string(max_rows) + " (raise --batch-size)");
         }
         llama_batch batch = llama_batch_init(rows, 0, 1);
         std::vector<int> out_idx;

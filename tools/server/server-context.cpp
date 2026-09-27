@@ -2486,7 +2486,7 @@ private:
 
         std::vector<std::string> keys;
         for (const auto & t : tasks) {
-            keys.push_back(t.decision_request.at("questions").dump());
+            keys.push_back(t.decision_request.at("layout").get<std::string>() + t.decision_request.at("questions").dump());
         }
         std::vector<bool> taken(tasks.size(), false);
         for (size_t i = 0; i < tasks.size(); ++i) {
@@ -2514,7 +2514,7 @@ private:
         }
     }
 
-    // tasks in group carry validated {"questions", "state" (rendered), "debug"}; all share the questions
+    // tasks in group carry validated {"questions", "state" (rendered), "debug", "layout"}; all share questions and layout
     void handle_systemone(const std::vector<server_task> & tasks, const std::vector<size_t> & group) {
         namespace so = llama_decision::systemone;
         if (params_base.n_seq_decision < 3) {
@@ -2525,20 +2525,15 @@ private:
                                                                         params_base.n_seq_decision);
         }
         const json & questions = tasks[group[0]].decision_request.at("questions");
-        const auto   cs        = so::compile(questions);
-
-        std::string shared;
-        std::vector<std::string> dynamic;
+        const auto   lay       = so::parse_layout(tasks[group[0]].decision_request.at("layout").get<std::string>());
+        std::vector<std::string> states;
         for (size_t j : group) {
-            const std::string state = tasks[j].decision_request.at("state").get<std::string>();
-            auto [head, tail] = llama_decision::render_prompt(chat_params.tmpls.get(), chat_params.use_jinja, cs.system_text, state);
-            if (dynamic.empty()) {
-                shared = head;
-            } else if (head != shared) {
-                throw std::runtime_error("the chat template renders a different prefix per state");
-            }
-            dynamic.push_back(tail);
+            states.push_back(tasks[j].decision_request.at("state").get<std::string>());
         }
+        const auto   pr      = so::build(chat_params.tmpls.get(), chat_params.use_jinja, questions, states, lay);
+        const auto & cs      = pr.cs;
+        const auto & shared  = pr.shared;
+        const auto & dynamic = pr.contexts;
 
         llama_decision::options opt;
         opt.mode = "tree"; // every answer needs the full distribution
@@ -2566,6 +2561,7 @@ private:
                     { "rounds",         b.rounds },
                     { "prefill_ms",     b.prefill_ms },
                     { "scoring_ms",     b.scoring_ms },
+                    { "layout",         tasks[group[0]].decision_request.at("layout") },
                     { "system_prompt",  cs.system_text },
                 };
                 // the exact text the engine tokenizes: prefix (cached) + state part, then per question
@@ -5449,6 +5445,7 @@ void server_routes::init_routes() {
         data["state"]     = so::render_state(body.at("state"));
         const std::string debug = req.get_param("debug");
         data["debug"]     = debug == "1" || debug == "true";
+        data["layout"]    = body.value("x_layout", params.systemone_layout);
 
         server_task task(SERVER_TASK_TYPE_SYSTEMONE);
         task.id               = res->rd.get_new_id();

@@ -64,6 +64,7 @@ class ServerProcess:
     model_tags: str | None = None
     decision_seqs: int | None = None
     systemone_confidence: str | None = None
+    systemone_layout: str | None = None
     model_url: str | None = None
     model_file: str | None = None
     model_draft: str | None = None
@@ -220,6 +221,8 @@ class ServerProcess:
             server_args.extend(["--decision-seqs", self.decision_seqs])
         if self.systemone_confidence:
             server_args.extend(["--systemone-confidence", self.systemone_confidence])
+        if self.systemone_layout:
+            server_args.extend(["--systemone-layout", self.systemone_layout])
         if self.n_ctx:
             server_args.extend(["--ctx-size", self.n_ctx])
         if self.n_slots:

@@ -48,6 +48,29 @@ std::string render_state(const common_json & state);
 // Engine fields and the cacheable system text for validated questions.
 compiled_schema compile(const common_json & questions);
 
+// Prompt layout (extension "x_layout", server option --systemone-layout):
+//   questions_first: all questions in the system turn (cached across requests), the state in the user turn,
+//                    each question scored as the first key of the answer object;
+//   state_first:     the state in the user turn, then per question a branch with only that question's block,
+//                    the end of the turn and '{"name": ' (as llamacpp-jev and openjev-sglang lay it out).
+enum class layout {
+    questions_first,
+    state_first,
+};
+
+// throws std::invalid_argument for an unknown name
+layout parse_layout(const std::string & name);
+
+struct prompt {
+    compiled_schema          cs;
+    std::string              shared;   // cached static prefix
+    std::vector<std::string> contexts; // per state: the dynamic part the branches fork from
+};
+
+// Everything decide_batch needs for validated questions and rendered states.
+prompt build(const common_chat_templates * tmpls, bool use_jinja, const common_json & questions,
+             const std::vector<std::string> & states, layout lay);
+
 // The "answers" object for validated questions, in request order.
 common_json answers(const common_json & questions, const result & r, confidence_mode mode);
 
