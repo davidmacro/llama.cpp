@@ -313,3 +313,26 @@ def test_router_systemone():
     res = router.make_request("POST", "/v1/systemone", data=req, timeout=120)
     assert res.status_code == 200, res.body
     check_answers(req, res.body)
+
+
+def test_official_sdk():
+    ts = pytest.importorskip("typesafe_sdk")
+    global server
+    server.model_alias = "jev-latest"
+    server.start()
+    base = f"http://{server.server_host}:{server.server_port}"
+    with ts.TypeSafeClient(api_key="local", base_url=base) as client:
+        assert [m.name for m in client.models.list().models] == ["jev-latest"]
+        r = client.system_one(
+            state={"document": "I was charged twice. Please fix this ASAP."},
+            questions={
+                "category": ts.Choice(instructions="What is this about?", criteria={"billing": None, "technical": None}),
+                "angry": ts.Noul(criteria=ts.NoulCriteria(true="Hostile", false="Calm")),
+                "urgency": ts.Score(criteria=["Can wait", "This week", "Today"]),
+            },
+        )
+        assert r.model == "jev-latest"
+        assert r.usage.output_tokens == 3
+        assert r.choices["category"].choice in ("billing", "technical")
+        with pytest.raises(ts.TypeSafeNotFoundError):
+            client.system_one(model="nope", state="x", questions={"q": ts.Noul()})

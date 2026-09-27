@@ -8,7 +8,7 @@ fields are answered in one `llama_decode` and cannot see each other. Each answer
 the JSON object is assembled by code, so it always matches the schema.
 
 This directory holds the engine (`decision-engine.*`), a CLI (`llama-parallel-decision`), and the engine is also
-served by `llama-server` as `POST /v1/decision`.
+served by `llama-server` as `POST /v1/decision` and, in the TypeSafe System One format, as `POST /v1/systemone`.
 
 ## Build
 
@@ -121,6 +121,52 @@ Numeric fields take `aggregate`: `mode` (default), `median` or `mean`.
 | `mode` | `auto` | `tree` scores every divergence node and returns exact probabilities; `greedy` walks the trie; `auto` picks tree up to `tree_max` values |
 | `tree_max` | 128 | per-field switch between tree and greedy |
 | `cache_prompt` | true | reuse the cached instructions + schema prefix |
+
+## POST /v1/systemone
+
+The same engine also speaks TypeSafe's [System One](https://api.typesafe.ai/openapi.json) wire format, so the official
+SDKs work against llama-server by changing only the base URL. It needs `--decision-seqs` like `/v1/decision`.
+
+```bash
+./build/bin/llama-server -m model.gguf -a jev-latest -ngl 99 -fa on -sm none --decision-seqs 128 --port 8096
+```
+
+```python
+from typesafe_sdk import Choice, TypeSafeClient
+
+with TypeSafeClient(api_key="local", base_url="http://localhost:8096") as client:
+    r = client.system_one(state="I was charged twice.",
+                          questions={"team": Choice(criteria={"billing": None, "technical": None})})
+```
+
+How questions map to the engine; every question is scored in tree mode, so each answer has the full distribution:
+
+| question | scored values | answer |
+|---|---|---|
+| `noul` | `true`, `false` | `noul` = p(true) |
+| `choice` | the `criteria` keys as JSON strings | `choice` = most likely key, `probabilities` per key |
+| `score` | `0` .. `n-1` | `score` = sum of `i * p_i`, `legend` = the criteria, `probabilities` per level |
+
+- The questions (with their instructions and criteria descriptions) form the cached system prompt; the state is the
+  user message (objects and arrays as indented JSON). Each question is scored as the first key of the answer object.
+- `confidence`: `--systemone-confidence entropy` (default, 1 - normalised entropy) or `max` (highest probability).
+  Neither is TypeSafe's calibrated confidence.
+- `usage.input_tokens` is the whole rendered prompt, cached or not; `usage.output_tokens` is the number of questions.
+- Invalid requests get 422 `{"detail": [...]}` in FastAPI / pydantic form (types, `loc` and messages checked against
+  the SDK's pydantic schemas). Unknown model: 404, `--decision-seqs` missing: 503, both `{"detail": "..."}`.
+- Local limits: 32 questions, 255 options or levels per question (422 `value_error` above that).
+- `model` must be the model name or an `--alias`; the response names the model (the first alias, sorted).
+- Requests that arrive while the server is busy are coalesced: those with the same questions share one batch and one
+  cached prefix. Size `--decision-seqs` to about `(1 + questions) x concurrent requests`; a short budget splits a
+  batch into sequential groups.
+- `?debug=1` adds `x_debug` (timings, batch size, cache hit, the system prompt) to the response.
+- `GET /v1/models` adds `models[]` (one entry per name and alias) with `description` and `release_date`, from
+  `--model-description` / `--model-release-date` or the GGUF `general.description` and the model file's date. The
+  OpenAI `data[]` list is unchanged. In router mode the same options work per preset.
+
+Gemma 4 E4B (Q4_K_XL) on one RTX PRO 6000, 5 questions, 304 cached + 33 state tokens: 30 ms warm, 72 ms with a new
+question set; about 110 requests/s at 16 concurrent clients and 120 at 64. On a multi-GPU machine `-sm none` saves
+about 12 ms per request for a model that fits on one card.
 
 ## CLI
 
