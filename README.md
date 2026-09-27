@@ -210,6 +210,31 @@ Gemma 4 E4B QAT (Q4_K_XL) on one RTX PRO 6000, 5 questions, 304 cached prompt to
 A smoke test on 40 support tickets, labelled by the fork author: department (4-way choice) is 95% correct and refund
 (noul) 97%; urgency (4-level score) is off by 0.48 levels on average.
 
+## Compared with llamacpp-jev
+
+A side-by-side run against [llamacpp-jev](https://github.com/NakliTechie/llamacpp-jev) (`38e5d4c`), the adapter
+implementation, on a stock CUDA `llama-server` (build 11222). Same GGUF (Gemma 4 E4B QAT Q4_K_XL), same GPU (one
+RTX PRO 6000), same offload flags, each system alone on the card. Requests carry 3 questions (department choice, refund
+noul, urgency score) about a new ticket each time; 40 hand-labelled tickets.
+
+| | This fork | llamacpp-jev (4 slots) | llamacpp-jev (16 slots) |
+|---|---|---|---|
+| Latency per request, p50 | **27.6 ms** | 126 ms | 127 ms |
+| Throughput, 16 clients | **125 req/s** | 10.6 req/s | 12.6 req/s |
+| Throughput, 64 clients | **167 req/s** | 9.0 req/s | 10.4 req/s |
+| Department accuracy | **0.95** | 0.90 | 0.90 |
+| Refund accuracy | **0.975** | 0.90 | 0.90 |
+| Urgency error (MAE, levels) | **0.48** | 0.62 | 0.62 |
+
+Running llamacpp-jev on this fork's own `llama-server` binary gives the same numbers (128 ms), so the difference comes
+from the design. llamacpp-jev sends each question as its own `/completion` call and reads the answer from top-k
+logprobs; this fork scores all questions of a request in one batched pass over a cached prompt and batches concurrent
+requests together.
+
+**Conclusion:** this fork answers 4.6x faster per request and serves 12-16x more requests under load, with accuracy
+equal or better on every question. Of the accuracy gaps, urgency is statistically clear (0.13 levels lower error, 95%
+CI 0.02-0.25); department and refund favour this fork by 2-3 tickets, which a 40-ticket set leaves within noise.
+
 ## Tests
 
 ```bash
