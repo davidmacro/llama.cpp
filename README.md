@@ -194,51 +194,63 @@ as `decision-seqs`, `model-description` and `model-release-date` can be set per 
 
 All other `llama-server` options work as usual; the same server also serves chat completions.
 
-## Performance
-
-Gemma 4 E4B QAT (Q4_K_XL) on one RTX PRO 6000, 5 questions, 304 cached prompt tokens + 33 state tokens:
-
-| Case | Result |
-|---|---|
-| Warm request | 30 ms |
-| New question set (cold prompt) | 72 ms |
-| 16 concurrent clients | about 110 requests/s |
-| 64 concurrent clients | about 120 requests/s |
-
-## Quality
-
-A smoke test on 40 support tickets, labelled by the fork author: department (4-way choice) is 95% correct and refund
-(noul) 97%; urgency (4-level score) is off by 0.48 levels on average.
-
-## Compared with llamacpp-jev
+## Evaluation: this fork vs llamacpp-jev
 
 A side-by-side run against [llamacpp-jev](https://github.com/NakliTechie/llamacpp-jev) (`38e5d4c`), the adapter
-implementation, on a stock CUDA `llama-server` (build 11222). Same GGUF (Gemma 4 E4B QAT Q4_K_XL), same GPU (one
-RTX PRO 6000), same offload flags, each system alone on the card.
+implementation, on a stock CUDA `llama-server` (build 11222).
 
-The test set has 600 hand-written support tickets in a full factorial design: 100 each in Dutch, English, Spanish,
-Portuguese, Afrikaans and 10 other languages (including Catalan and Galician); 5 departments including vague
-tickets; with and without a refund request; calm and upset tone. Each request asks three questions: department
-(choice, with "other"), refund (noul) and language (choice, with "other").
+**Setup.** Same GGUF (Gemma 4 E4B QAT Q4_K_XL), same GPU (one RTX PRO 6000, `-sm none`), same offload flags, each
+system alone on the card. This fork runs with `--decision-seqs 128`; llamacpp-jev with 4 and with 16 slots, the
+backend flags its README requires, and its admission limit raised so requests queue for a slot. A control run puts
+llamacpp-jev on this fork's own `llama-server` binary.
 
-| | This fork | llamacpp-jev (4 slots) | llamacpp-jev (16 slots) |
+**Test set.** 600 hand-written support tickets, full factorial, shuffled:
+
+| Factor | Levels |
+|---|---|
+| Language | Dutch, English, Spanish, Portuguese, Afrikaans, other; 100 each. The 100 "other" tickets cover German, French, Italian, Catalan, Galician, Polish, Turkish, Swedish, Indonesian and Swahili (10 each). |
+| Department | billing, technical, account, shipping, other (vague tickets such as "I'm not happy with what I got") |
+| Refund | asks for money back / does not |
+| Tone | calm / upset |
+| Scenario | 5 distinct tickets per cell |
+
+The scenarios are translated across the five target languages, so content is constant across them. Each request asks
+three questions: department (5-way choice with descriptions), refund (noul) and language (6-way choice with "other").
+
+### Results
+
+| | This fork | llamacpp-jev, 4 slots | llamacpp-jev, 16 slots |
 |---|---|---|---|
-| Latency per request, p50 | **28 ms** | 131 ms | 130 ms |
+| Latency per ticket, p50 | **28 ms** | 131 ms | 130 ms |
 | Throughput, 16 clients | **130 req/s** | 9.7 req/s | 11.1 req/s |
 | Throughput, 64 clients | **178 req/s** | 8.8 req/s | 9.9 req/s |
 | Department accuracy | **0.955** | 0.787 | 0.787 |
 | Refund accuracy | **0.998** | 0.987 | 0.987 |
 | Language accuracy | 0.928 | **0.962** | **0.962** |
 
-Running llamacpp-jev on this fork's own `llama-server` binary gives the same numbers (131 ms), so the speed difference
-comes from the design. llamacpp-jev sends each question as its own `/completion` call and reads the answer from top-k
-logprobs; this fork scores all questions of a request in one batched pass over a cached prompt and batches concurrent
+Paired over the same 600 tickets (exact McNemar): department favours this fork 111 to 10 (p = 1e-22), refund 8 to 1
+(p = 0.04), language favours llamacpp-jev 29 to 9 (p = 0.002).
+
+**Speed.** llamacpp-jev on this fork's binary gives the same 131 ms, so the gap comes from the design: llamacpp-jev runs
+one `/completion` call per question on the request's slot, one after another, and reads each answer from top-k
+logprobs. This fork scores all questions of a request in one batched pass over a cached prompt and batches concurrent
 requests together.
 
-**Conclusion:** this fork answers 4.6x faster per request and serves 13-18x more requests under load. It is more
-accurate on department (paired p = 1e-22), mostly on tickets that combine a problem with a refund request, where
-llamacpp-jev routes to billing, and on vague tickets (0.92 vs 0.52). llamacpp-jev is more accurate on language
-detection (p = 0.002): this fork more often reads Afrikaans as Dutch and Galician or Catalan as Portuguese or Spanish.
+**Department.** The gap sits in tickets with a refund request (0.95 vs 0.65) and in vague tickets (0.92 vs 0.52).
+llamacpp-jev routes most refund requests to billing: 108 of its 128 errors. On tickets without a refund request the
+two are close (0.96 vs 0.93). This coding scheme routes by the underlying problem; a scheme that sends every refund to
+billing would favour llamacpp-jev.
+
+**Language.** Both are near perfect on Dutch, English, Spanish and Portuguese. This fork reads Afrikaans as Dutch more
+often (Afrikaans 0.85 vs 0.92) and labels closely related other languages as their neighbour: Galician as Portuguese
+(0 of 10 answered "other", llamacpp-jev 3 of 10) and Catalan as Spanish (4 of 10, llamacpp-jev 10 of 10). This fork
+scores the option key (`"AF"`, `"NL"`) as the answer, and llamacpp-jev shows the language names; language names as
+keys (`"Afrikaans"`) are the first thing to try.
+
+**Conclusion.** This fork answers 4.6x faster per ticket and serves 13-18x more tickets under load. It routes
+departments more accurately, clearly so for refund and vague tickets, and matches llamacpp-jev on refund detection.
+llamacpp-jev detects languages more accurately, with the difference concentrated in Afrikaans, Galician and Catalan.
+Texts and labels are by the fork author, on one model and one GPU.
 
 ## Tests
 
