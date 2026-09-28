@@ -211,12 +211,12 @@ server. The test set has 441 hair-salon customer comments: 63 comments in each o
 Portuguese, Romanian and Italian, in a balanced design (L9 orthogonal array x 7 variants). Each comment is rated on
 four aspects, price, quality, speed and customer service, as good, bad or not mentioned: 1764 judgements per method.
 
-| Method | Overall accuracy |
-|---|---|
-| This fork, `questions-first` (default) | **0.985** |
-| This fork, `catalog` | **0.985** |
-| This fork, `state-first` | 0.967 |
-| llamacpp-jev | 0.972 |
+| Method | Overall accuracy | Latency per comment (p50) |
+|---|---|---|
+| This fork, `questions-first` (default) | **0.985** | **150 ms** |
+| This fork, `catalog` | **0.985** | 167 ms |
+| This fork, `state-first` | 0.967 | 335 ms |
+| llamacpp-jev | 0.972 | 1370 ms |
 
 ## Tests
 
