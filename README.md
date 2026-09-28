@@ -164,21 +164,17 @@ These extend the official schema and are opt-in.
   "topic":    {"type": "choice", "x_labels": "letters", "criteria": {"q7mz": "Billing", "t1x9": "Technical"}}
   ```
 
-  On Gemma 4 E4B, names scored as well as codes or better, and clearly better for bare option names; codes
-  matched names only for opaque keys. Use `letters` for ids, long codes or awkward keys.
+  Use `letters` for ids, long codes or awkward keys.
 - **`x_layout`** on the request (server default: `--systemone-layout`), one of four prompt layouts. All of them score
   every question in one batched pass; they differ in what the model sees before each answer.
 
-  | Layout | What each question sees | Gemma 4 12B: department / language | Per ticket |
-  |---|---|---|---|
-  | `questions-first` (default) | all questions in one cached system prompt; answered as the first key of one JSON object | **0.905** / 0.832 | **49 ms** |
-  | `catalog` | the same, answered as `{"question": name, "answer": value}`; option keys shared between questions written as `"language.other"` | 0.895 / 0.918 | 50 ms |
-  | `state-first` | the state, then only its own question (as llamacpp-jev lays it out) | 0.780 / **0.983** | 71 ms |
-  | `state-first-context` | as `state-first`, plus one line naming the other questions | 0.808 / **0.982** | 115 ms |
+  | Layout | What each question sees |
+  |---|---|
+  | `questions-first` (default) | all questions in one cached system prompt; answered as the first key of one JSON object |
+  | `catalog` | the same, answered as `{"question": name, "answer": value}`; option keys shared between questions written as `"language.other"` |
+  | `state-first` | the state, then only its own question (as llamacpp-jev lays it out) |
+  | `state-first-context` | as `state-first`, plus one line naming the other questions |
 
-  Seeing the other questions helps department routing (a separate refund question keeps refund requests out of
-  "billing") and hurts language detection (shared option keys and answer positions). `catalog` keeps the first and
-  removes most of the second; the state-first layouts detect language best.
 - **`?debug=1`** adds `x_debug` to the response: timings, batch size, cache hit, scored rows, the system prompt, the full rendered prompt (`prompt_prefix` + `prompt_state`) and per question the text it is scored after and its candidates (`fields`).
 
 ### `GET /v1/models`
@@ -210,100 +206,17 @@ All other `llama-server` options work as usual; the same server also serves chat
 
 ## Evaluation: this fork vs llamacpp-jev
 
-A side-by-side run against [llamacpp-jev](https://github.com/NakliTechie/llamacpp-jev) (`38e5d4c`), the adapter
-implementation, on a stock CUDA `llama-server` (build 11222).
+Qwen3.8-27B (UD-Q5_K_XL) on one RTX PRO 6000, served by this fork; llamacpp-jev (`38e5d4c`) connects to the same
+server. The test set has 441 hair-salon customer comments: 63 comments in each of Dutch, Afrikaans, English, Spanish,
+Portuguese, Romanian and Italian, in a balanced design (L9 orthogonal array x 7 variants). Each comment is rated on
+four aspects, price, quality, speed and customer service, as good, bad or not mentioned: 1764 judgements per method.
 
-**Setup.** Same GGUF (Gemma 4 E4B QAT Q4_K_XL), same GPU (one RTX PRO 6000, `-sm none`), same offload flags, each
-system alone on the card. This fork runs with `--decision-seqs 128`; llamacpp-jev with 4 and with 16 slots, the
-backend flags its README requires, and its admission limit raised so requests queue for a slot. A control run puts
-llamacpp-jev on this fork's own `llama-server` binary.
-
-**Test set.** 600 hand-written support tickets, full factorial, shuffled:
-
-| Factor | Levels |
+| Method | Overall accuracy |
 |---|---|
-| Language | Dutch, English, Spanish, Portuguese, Afrikaans, other; 100 each. The 100 "other" tickets cover German, French, Italian, Catalan, Galician, Polish, Turkish, Swedish, Indonesian and Swahili (10 each). |
-| Department | billing, technical, account, shipping, other (vague tickets such as "I'm not happy with what I got") |
-| Refund | asks for money back / does not |
-| Tone | calm / upset |
-| Scenario | 5 distinct tickets per cell |
-
-The scenarios are translated across the five target languages, so content is constant across them. Each request asks
-three questions: department (5-way choice with descriptions), refund (noul) and language (6-way choice with "other").
-
-### Results
-
-| | This fork | llamacpp-jev, 4 slots | llamacpp-jev, 16 slots |
-|---|---|---|---|
-| Latency per ticket, p50 | **28 ms** | 131 ms | 130 ms |
-| Throughput, 16 clients | **130 req/s** | 9.7 req/s | 11.1 req/s |
-| Throughput, 64 clients | **178 req/s** | 8.8 req/s | 9.9 req/s |
-| Department accuracy | **0.955** | 0.787 | 0.787 |
-| Refund accuracy | **0.998** | 0.987 | 0.987 |
-| Language accuracy | 0.928 | **0.962** | **0.962** |
-
-Paired over the same 600 tickets (exact McNemar): department favours this fork 111 to 10 (p = 1e-22), refund 8 to 1
-(p = 0.04), language favours llamacpp-jev 29 to 9 (p = 0.002).
-
-**Speed.** llamacpp-jev on this fork's binary gives the same 131 ms, so the gap comes from the design: llamacpp-jev runs
-one `/completion` call per question on the request's slot, one after another, and reads each answer from top-k
-logprobs. This fork scores all questions of a request in one batched pass over a cached prompt and batches concurrent
-requests together.
-
-**Department.** The gap sits in tickets with a refund request (0.95 vs 0.65) and in vague tickets (0.92 vs 0.52).
-llamacpp-jev routes most refund requests to billing: 108 of its 128 errors. On tickets without a refund request the
-two are close (0.96 vs 0.93). This coding scheme routes by the underlying problem; a scheme that sends every refund to
-billing would favour llamacpp-jev.
-
-**Language.** Both are near perfect on Dutch, English, Spanish and Portuguese. This fork reads Afrikaans as Dutch more
-often (Afrikaans 0.85 vs 0.92) and labels closely related other languages as their neighbour: Galician as Portuguese
-(0 of 10 answered "other", llamacpp-jev 3 of 10) and Catalan as Spanish (4 of 10, llamacpp-jev 10 of 10). This fork
-scores the option key (`"AF"`, `"NL"`) as the answer, and llamacpp-jev shows the language names; language names as
-keys (`"Afrikaans"`) are the first thing to try.
-
-**Conclusion.** This fork answers 4.6x faster per ticket and serves 13-18x more tickets under load. It routes
-departments more accurately, clearly so for refund and vague tickets, and matches llamacpp-jev on refund detection.
-llamacpp-jev detects languages more accurately, with the difference concentrated in Afrikaans, Galician and Catalan.
-Texts and labels are by the fork author, on one model and one GPU.
-
-### Gemma 4 12B
-
-The same 600 tickets on Gemma 4 12B QAT (Q4_K_XL), every server pinned to one GPU with reasoning off
-(`--split-mode layer --tensor-split 1,0 --main-gpu 0 --reasoning off --kv-unified --cache-type-k/v q8_0`), this fork at
-`--parallel 1 --decision-seqs 12`:
-
-| | This fork | llamacpp-jev, 4 slots | llamacpp-jev, 16 slots |
-|---|---|---|---|
-| Latency per ticket, p50 | **49 ms** | 281 ms | 303 ms |
-| Throughput, 16 clients | **36 req/s** (82 with `--decision-seqs 128`) | 5.9 req/s | 7.7 req/s |
-| Throughput, 64 clients | **39 req/s** (98 with `--decision-seqs 128`) | 6.3 req/s | 6.4 req/s |
-| Department accuracy | **0.905** | 0.705 | 0.707 |
-| Refund accuracy | **0.998** | **0.998** | **0.998** |
-| Language accuracy | 0.832 | **0.975** | 0.973 |
-
-The pattern holds and sharpens. This fork is 5-6x faster per ticket, and `--decision-seqs` sets its throughput under
-load (12 sequences hold about 2-3 tickets per pass). Department favours this fork 123 to 3 (p = 8e-33), again on
-refund tickets, which llamacpp-jev routes to billing. Language favours llamacpp-jev 94 to 8 (p = 9e-20): on 12B this
-fork answers "other" for many Portuguese (53 of 100) and Afrikaans (31) tickets. Keying the language options by name
-(`"Portuguese"` instead of `"PT"`) lifts this fork to 0.875, letters to 0.923.
-
-### Qwen3.8-27B
-
-The same 600 tickets on Qwen3.8-27B (UD-Q5_K_XL, hybrid attention), same flags, across all layouts:
-
-| | This fork, questions-first | This fork, catalog | This fork, state-first | llamacpp-jev, 4 slots |
-|---|---|---|---|---|
-| Latency per ticket, p50 | **83 ms** | 87 ms | 205 ms | 488 ms |
-| Throughput, 16 clients | **15.3 req/s** (19.5 with `--decision-seqs 128`) | 14.0 req/s | 4.2 req/s | 2.3 req/s |
-| Department accuracy | 0.888 (0.920 with letters) | **0.902** | 0.745 | 0.763 |
-| Refund accuracy | **1.000** | **1.000** | **1.000** | **1.000** |
-| Language accuracy | **0.995** | 0.983 | 0.992 | 0.970 |
-
-On this model questions-first, the default, wins on every question and on speed: department 75 to 0 against
-llamacpp-jev (p = 5e-23), language 17 to 2 (p = 7e-4). The language weakness seen on Gemma 4 12B belongs to that
-model under the questions-first prompt; Qwen3.8-27B reads Portuguese and Afrikaans correctly in every layout.
-State-first lowers department accuracy on both Gemma 4 12B and Qwen3.8-27B, again on refund tickets that go to
-billing.
+| This fork, `questions-first` (default) | **0.985** |
+| This fork, `catalog` | **0.985** |
+| This fork, `state-first` | 0.967 |
+| llamacpp-jev | 0.972 |
 
 ## Tests
 
