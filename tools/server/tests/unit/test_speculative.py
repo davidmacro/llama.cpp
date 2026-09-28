@@ -203,3 +203,19 @@ def test_multi_requests_parallel(n_slots: int, n_requests: int):
     for res in results:
         assert res.status_code == 200
         assert match_regex("(wise|kind|owl|answer)+", res.body["content"])
+
+
+def test_speculative_with_decision_seqs():
+    # the draft context must not reserve the /v1/systemone decision sequences of the target context
+    global server
+    server.decision_seqs = 4
+    server.n_ctx = 2048
+    server.start()
+    res = server.make_request("POST", "/completion", data={"prompt": "I believe the meaning of life is", "n_predict": 16})
+    assert res.status_code == 200
+    res = server.make_request("POST", "/v1/systemone", data={
+        "model": server.model_alias, "state": "hello",
+        "questions": {"greeting": {"type": "noul", "instructions": "Is this a greeting?"}},
+    })
+    assert res.status_code == 200, res.body
+    assert 0 <= res.body["answers"]["greeting"]["noul"] <= 1
