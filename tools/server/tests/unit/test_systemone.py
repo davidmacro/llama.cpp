@@ -516,3 +516,185 @@ def test_systemone_bad_image_ref():
     res = server.make_request("POST", "/v1/systemone", data=dict(IMAGE_REQ, x_images=["https://example.com/a.png"]))
     assert res.status_code == 422, res.body
     assert res.body["detail"][0]["loc"] == ["body", "x_images", 0]
+
+
+JPEG_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "mtmd", "test-1.jpeg")
+LAYOUTS = ["questions-first", "catalog", "state-first", "state-first-context"]
+
+
+def jpeg_b64() -> str:
+    import base64
+    with open(JPEG_PATH, "rb") as f:
+        return base64.b64encode(f.read()).decode()
+
+
+def raw_b64(data_uri: str) -> str:
+    return data_uri.split(",", 1)[1]
+
+
+def vision_start(**kw) -> ServerProcess:
+    global server
+    server = vision_server()
+    server.n_ctx = 4096
+    for k, v in kw.items():
+        setattr(server, k, v)
+    server.start()
+    return server
+
+
+def post(req: dict, debug: bool = True):
+    return server.make_request("POST", "/v1/systemone" + ("?debug=1" if debug else ""), data=req)
+
+
+def ok(res, req=IMAGE_REQ) -> dict:
+    assert res.status_code == 200, res.body
+    body = dict(res.body)
+    body.pop("x_debug", None)
+    check_answers(req, body)
+    return res.body
+
+
+def image_errors(res) -> list:
+    return [(e["type"], e["loc"]) for e in detail(res)]
+
+
+def post_parallel(reqs: list) -> list:
+    return parallel_function_calls([(post, (r, False)) for r in reqs])
+
+
+@pytest.mark.parametrize("name,image", [
+    ("png-data-uri", lambda: png_data_uri((255, 0, 0))),
+    ("png-raw", lambda: raw_b64(png_data_uri((0, 255, 0)))),
+    ("jpeg-data-uri", lambda: "data:image/jpeg;base64," + jpeg_b64()),
+    ("jpeg-raw", lambda: jpeg_b64()),
+])
+@pytest.mark.parametrize("field", ["x_images", "x_shared_images"])
+def test_systemone_image_formats(name, image, field):
+    vision_start()
+    body = ok(post(dict(IMAGE_REQ, **{field: [image()]})))
+    key = "context_image_tokens" if field == "x_images" else "shared_image_tokens"
+    assert body["x_debug"][key] > 0
+
+
+def test_systemone_shared_image_cache():
+    vision_start()
+    red, blue = png_data_uri((255, 0, 0)), png_data_uri((0, 0, 255))
+    req = dict(IMAGE_REQ, x_shared_images=[red])
+    first = post(req)
+    again = post(req)
+    other_state = post(dict(req, state="A different ticket."))
+    changed = post(dict(req, x_shared_images=[blue]))
+    for r in (first, again, other_state, changed):
+        ok(r)
+    assert not first.body["x_debug"]["cache_hit"]
+    assert again.body["x_debug"]["cache_hit"]
+    assert other_state.body["x_debug"]["cache_hit"]
+    assert not changed.body["x_debug"]["cache_hit"]
+    assert first.body["answers"] == again.body["answers"]
+
+
+def test_systemone_shared_images_keyed_per_request():
+    # the same questions with different shared images, coalesced: each caller gets its own answers
+    vision_start(n_slots=4)
+    imgs = [png_data_uri(c) for c in [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]]
+    reqs = [dict(IMAGE_REQ, x_shared_images=[i]) for i in imgs]
+    solo = [post(r, False) for r in reqs]
+    together = post_parallel(reqs)
+    for s, c in zip(solo, together):
+        ok(s)
+        ok(c)
+        assert c.body["usage"]["input_tokens"] == s.body["usage"]["input_tokens"]
+        for name in IMAGE_REQ["questions"]:
+            assert c.body["answers"][name]["type"] == s.body["answers"][name]["type"]
+
+
+@pytest.mark.parametrize("images,expected", [
+    (["!!!not base64!!!"], [("value_error", [0])]),
+    (["data:image/png;base64,@@@@"], [("value_error", [0])]),
+    (["data:text/plain;base64,aGVsbG8="], [("value_error", [0])]),
+    ([5], [("string_type", [0])]),
+    ([{"url": "x"}], [("string_type", [0])]),
+    ("abcd", [("list_type", [])]),
+    (["http://example.com/a.png"], [("value_error", [0])]),
+    (["file:///tmp/a.png"], [("value_error", [0])]),
+    (["eA=="] * 17, [("too_long", [])]),
+])
+@pytest.mark.parametrize("field", ["x_images", "x_shared_images"])
+def test_systemone_image_validation(images, expected, field):
+    vision_start()
+    res = post(dict(IMAGE_REQ, **{field: images}), False)
+    assert image_errors(res) == [(t, ["body", field] + loc) for t, loc in expected]
+
+
+def test_systemone_image_validation_without_mmproj():
+    # shape validation does not depend on the model
+    global server
+    server.start()
+    res = server.make_request("POST", "/v1/systemone", data=dict(EXAMPLE, x_images=[7]))
+    assert image_errors(res) == [("string_type", ["body", "x_images", 0])]
+
+
+def test_systemone_non_image_bytes():
+    import base64
+    vision_start()
+    junk = base64.b64encode(b"this is definitely not an image" * 20).decode()
+    for ref in (junk, "data:image/png;base64," + junk):
+        res = post(dict(IMAGE_REQ, x_images=[ref]), False)
+        assert image_errors(res) == [("value_error", ["body", "x_images", 0])]
+    res = post(dict(IMAGE_REQ, x_shared_images=[junk]), False)
+    assert image_errors(res) == [("value_error", ["body", "x_shared_images", 0])]
+
+
+def test_systemone_images_without_mmproj():
+    vision_start(no_mmproj=True)
+    for field in ("x_images", "x_shared_images"):
+        res = post(dict(IMAGE_REQ, **{field: [png_data_uri((255, 0, 0))]}), False)
+        assert res.status_code == 400, res.body
+    ok(post(IMAGE_REQ, False))  # text-only still works
+
+
+def test_systemone_text_only_on_vision_server():
+    vision_start()
+    ok(post(IMAGE_REQ))
+    body = ok(post(dict(IMAGE_REQ, x_images=[], x_shared_images=[])))
+    assert body["x_debug"]["shared_image_tokens"] == 0 and body["x_debug"]["context_image_tokens"] == 0
+
+
+def test_systemone_concurrent_text_and_images():
+    vision_start(n_slots=4)
+    red, blue = png_data_uri((255, 0, 0)), png_data_uri((0, 0, 255))
+    reqs = [
+        IMAGE_REQ,
+        dict(IMAGE_REQ, x_images=[red]),
+        dict(IMAGE_REQ, x_shared_images=[blue]),
+        dict(IMAGE_REQ, x_shared_images=[blue], x_images=[red], state="Another ticket."),
+        dict(IMAGE_REQ, x_images=[blue]),
+        dict(IMAGE_REQ, state="Text only, other state."),
+    ] * 2
+    for r in post_parallel(reqs):
+        ok(r)
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_systemone_layouts_with_images(layout):
+    vision_start()
+    red, blue = png_data_uri((255, 0, 0)), png_data_uri((0, 0, 255))
+    req = dict(IMAGE_REQ, x_layout=layout, x_images=[red], x_shared_images=[blue])
+    body = ok(post(req))
+    d = body["x_debug"]
+    assert d["layout"] == layout
+    assert d["shared_image_tokens"] > 0 and d["context_image_tokens"] > 0
+    assert body["usage"]["input_tokens"] == d["shared_tokens"] + d["context_tokens"]
+    again = post(dict(req, state="Next ticket."))
+    ok(again)
+    assert again.body["x_debug"]["cache_hit"]
+
+
+@pytest.mark.parametrize("field", ["x_images", "x_shared_images"])
+def test_systemone_image_adds_input_tokens(field):
+    vision_start()
+    img = png_data_uri((9, 9, 9))
+    plain = ok(post(IMAGE_REQ, False))
+    one = ok(post(dict(IMAGE_REQ, **{field: [img]}), False))
+    two = ok(post(dict(IMAGE_REQ, **{field: [img, img]}), False))
+    assert plain["usage"]["input_tokens"] < one["usage"]["input_tokens"] < two["usage"]["input_tokens"]
