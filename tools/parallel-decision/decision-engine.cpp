@@ -2,6 +2,7 @@
 
 #include "chat.h"
 #include "common.h"
+#include "mtmd-helper.h"
 
 #include <algorithm>
 #include <chrono>
@@ -16,6 +17,63 @@ namespace {
 
 double ms_since(std::chrono::steady_clock::time_point t) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+}
+
+size_t count_tokens(const prompt_pieces & ps) {
+    size_t n = 0;
+    for (const auto & p : ps) {
+        n += p.n_tokens();
+    }
+    return n;
+}
+
+size_t count_image_tokens(const prompt_pieces & ps) {
+    size_t n = 0;
+    for (const auto & p : ps) {
+        n += p.image ? p.n_tokens() : 0;
+    }
+    return n;
+}
+
+llama_pos count_pos(const prompt_pieces & ps) {
+    llama_pos n = 0;
+    for (const auto & p : ps) {
+        n += p.n_pos();
+    }
+    return n;
+}
+
+// equal text tokens, and images with the same content id (mtmd-helper sets the SHA-256 of the file)
+bool same_pieces(const prompt_pieces & a, const prompt_pieces & b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.size(); ++i) {
+        if ((a[i].image == nullptr) != (b[i].image == nullptr)) {
+            return false;
+        }
+        if (a[i].image == nullptr) {
+            if (a[i].toks != b[i].toks) {
+                return false;
+            }
+            continue;
+        }
+        const char * ia = mtmd_input_chunk_get_id(a[i].image.get());
+        const char * ib = mtmd_input_chunk_get_id(b[i].image.get());
+        if (ia == nullptr || ib == nullptr || *ia == '\0' || std::string(ia) != ib ||
+            a[i].n_tokens() != b[i].n_tokens()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+prompt_pieces text_pieces(tokens_t toks) {
+    prompt_pieces ps;
+    if (!toks.empty()) {
+        ps.push_back({ std::move(toks), nullptr });
+    }
+    return ps;
 }
 
 struct decision_field {
@@ -173,8 +231,16 @@ struct decision_field {
 
 // ---------------------------------------------------------------- engine
 
-engine::engine(llama_context * ctx, llama_seq_id seq_base, int n_seqs)
-    : ctx(ctx), vocab(llama_model_get_vocab(llama_get_model(ctx))), mem(llama_get_memory(ctx)),
+size_t prompt_piece::n_tokens() const {
+    return image ? mtmd_input_chunk_get_n_tokens(image.get()) : toks.size();
+}
+
+llama_pos prompt_piece::n_pos() const {
+    return image ? mtmd_input_chunk_get_n_pos(image.get()) : (llama_pos) toks.size();
+}
+
+engine::engine(llama_context * ctx, llama_seq_id seq_base, int n_seqs, mtmd_context * mctx)
+    : ctx(ctx), mctx(mctx), vocab(llama_model_get_vocab(llama_get_model(ctx))), mem(llama_get_memory(ctx)),
       seq_snap(seq_base), seq_pool(seq_base + 1), n_pool(n_seqs - 1),
       pad_branches(llama_model_is_recurrent(llama_get_model(ctx)) || llama_model_is_hybrid(llama_get_model(ctx))) {
     if (n_seqs < 3) {
@@ -192,7 +258,74 @@ tokens_t engine::tokenize(const std::string & text, bool add_special) const {
     return toks;
 }
 
+prompt_pieces engine::tokenize_pieces(const std::string & text, const std::vector<const mtmd_bitmap *> & bitmaps,
+                                      bool add_special) const {
+    if (bitmaps.empty()) {
+        return text_pieces(tokenize(text, add_special));
+    }
+    if (mctx == nullptr) {
+        throw std::invalid_argument("image input needs a multimodal projector: start the server with --mmproj");
+    }
+    mtmd_input_text in = { text.c_str(), text.size(), add_special, /*parse_special=*/ true };
+    std::unique_ptr<mtmd_input_chunks, decltype(&mtmd_input_chunks_free)> chunks(mtmd_input_chunks_init(), mtmd_input_chunks_free);
+    const int32_t rc = mtmd_tokenize(mctx, chunks.get(), &in, bitmaps.data(), bitmaps.size());
+    if (rc == 1) {
+        throw std::invalid_argument("the prompt does not hold one media marker per image");
+    }
+    if (rc != 0) {
+        throw std::invalid_argument("failed to preprocess an image (" + std::to_string(rc) + ")");
+    }
+    prompt_pieces out;
+    for (size_t i = 0; i < mtmd_input_chunks_size(chunks.get()); ++i) {
+        const mtmd_input_chunk * c = mtmd_input_chunks_get(chunks.get(), i);
+        if (mtmd_input_chunk_get_type(c) == MTMD_INPUT_CHUNK_TYPE_TEXT) {
+            size_t n = 0;
+            const llama_token * t = mtmd_input_chunk_get_tokens_text(c, &n);
+            if (n == 0) {
+                continue;
+            }
+            if (out.empty() || out.back().image) {
+                out.push_back({ {}, nullptr });
+            }
+            out.back().toks.insert(out.back().toks.end(), t, t + n);
+        } else {
+            out.push_back({ {}, std::shared_ptr<const mtmd_input_chunk>(mtmd_input_chunk_copy(c), mtmd_input_chunk_free) });
+        }
+    }
+    // as tokenize(): a chat template may already start with the BOS text; keep a single BOS
+    const llama_token bos = llama_vocab_bos(vocab);
+    if (!out.empty() && !out[0].image && out[0].toks.size() >= 2 && out[0].toks[0] == bos && out[0].toks[1] == bos) {
+        out[0].toks.erase(out[0].toks.begin());
+    }
+    return out;
+}
+
+// Encode an image chunk (unless it is the one encoded last) and decode its embeddings on seq.
+void engine::decode_image(const mtmd_input_chunk * chunk, llama_pos pos0, llama_seq_id seq, std::string & encoded_id) {
+    if (mctx == nullptr) {
+        throw std::invalid_argument("image input needs a multimodal projector: start the server with --mmproj");
+    }
+    const char *      cid = mtmd_input_chunk_get_id(chunk);
+    const std::string id  = cid ? cid : "";
+    if (id.empty() || id != encoded_id) {
+        encoded_id.clear();
+        if (mtmd_encode_chunk(mctx, chunk) != 0) {
+            throw std::runtime_error("failed to encode an image of the decision prompt");
+        }
+        encoded_id = id;
+    }
+    llama_pos n_past = 0;
+    const int32_t rc = mtmd_helper_decode_image_chunk(mctx, ctx, chunk, mtmd_get_output_embd(mctx), pos0, seq,
+                                                      (int32_t) llama_n_batch(ctx), &n_past, nullptr, nullptr);
+    if (rc != 0) {
+        throw std::runtime_error(rc == 1 ? "no free KV cache space for an image of the decision prompt"
+                                         : "failed to decode an image of the decision prompt (" + std::to_string(rc) + ")");
+    }
+}
+
 // Decode several prompts, each on its own sequence, packed into as few batches as n_batch allows.
+// Images are decoded one sequence at a time: text up to each part's next image is batched across
+// parts, then those images are decoded, and so on. A text-only prompt is a single batched pass.
 void engine::decode_parts(const std::vector<prompt_part> & parts) {
     const int n_batch = (int) llama_n_batch(ctx);
     llama_batch batch = llama_batch_init(n_batch, 0, 1);
@@ -200,37 +333,68 @@ void engine::decode_parts(const std::vector<prompt_part> & parts) {
         const int rc = batch.n_tokens > 0 ? llama_decode(ctx, batch) : 0;
         common_batch_clear(batch);
         if (rc != 0) {
-            llama_batch_free(batch);
             throw std::runtime_error(rc == 1 ? "no free KV cache space for the decision prompt"
                                              : "llama_decode failed on the decision prompt (" + std::to_string(rc) + ")");
         }
     };
-    for (const auto & p : parts) {
-        for (size_t i = 0; i < p.toks->size(); ++i) {
-            if (batch.n_tokens == n_batch) {
-                flush();
-            }
-            common_batch_add(batch, (*p.toks)[i], p.pos0 + (llama_pos) i, { p.seq }, false);
-        }
+    std::vector<size_t>    next(parts.size(), 0);
+    std::vector<llama_pos> pos(parts.size());
+    for (size_t k = 0; k < parts.size(); ++k) {
+        pos[k] = parts[k].pos0;
     }
-    flush();
+    std::string encoded_id; // the same image in several parts (or in a row) is encoded once
+    try {
+        while (true) {
+            for (size_t k = 0; k < parts.size(); ++k) {
+                const auto & ps = *parts[k].pieces;
+                for (; next[k] < ps.size() && !ps[next[k]].image; ++next[k]) {
+                    for (llama_token t : ps[next[k]].toks) {
+                        if (batch.n_tokens == n_batch) {
+                            flush();
+                        }
+                        common_batch_add(batch, t, pos[k]++, { parts[k].seq }, false);
+                    }
+                }
+            }
+            flush();
+            bool more = false;
+            for (size_t k = 0; k < parts.size(); ++k) {
+                const auto & ps = *parts[k].pieces;
+                if (next[k] < ps.size()) {
+                    decode_image(ps[next[k]].image.get(), pos[k], parts[k].seq, encoded_id);
+                    pos[k] += ps[next[k]].n_pos();
+                    ++next[k];
+                    more = true;
+                }
+            }
+            if (!more) {
+                break;
+            }
+        }
+    } catch (...) {
+        llama_batch_free(batch);
+        throw;
+    }
     llama_batch_free(batch);
 }
 
 // Restore (or build) the cached static prefix on seq_snap. Only this engine's own sequences are
 // touched, so it can share a context with other users (e.g. server slots).
-bool engine::prepare_prefix(const tokens_t & shared, bool allow_cache) {
-    if (allow_cache && !shared.empty() && shared == cached &&
-        llama_memory_seq_pos_max(mem, seq_snap) == (llama_pos) cached.size() - 1) {
+bool engine::prepare_prefix(const prompt_pieces & shared, bool allow_cache) {
+    const bool empty = count_tokens(shared) == 0;
+    if (allow_cache && !empty && same_pieces(shared, cached) &&
+        llama_memory_seq_pos_max(mem, seq_snap) == cached_pos_max) {
         return true;
     }
     for (llama_seq_id s = seq_snap; s < seq_pool + n_pool; ++s) {
         llama_memory_seq_rm(mem, s, -1, -1);
     }
     cached.clear();
-    if (!shared.empty()) {
+    cached_pos_max = -1;
+    if (!empty) {
         decode_parts({ { &shared, 0, seq_snap } });
-        cached = shared;
+        cached         = shared;
+        cached_pos_max = llama_memory_seq_pos_max(mem, seq_snap);
     }
     return false;
 }
@@ -323,17 +487,29 @@ batch_result engine::decide_batch(const std::string & shared_text, const std::ve
     if (opt.mode != "auto" && opt.mode != "tree" && opt.mode != "greedy") {
         throw std::invalid_argument("mode must be auto, tree or greedy");
     }
-    if (contexts.empty()) {
+    const prompt_pieces shared = text_pieces(tokenize(shared_text, true));
+    std::vector<prompt_pieces> prefixes;
+    for (const auto & text : contexts) {
+        prefixes.push_back(text_pieces(tokenize(text, shared.empty())));
+    }
+    return decide_batch(shared, prefixes, inputs, opt);
+}
+
+batch_result engine::decide_batch(const prompt_pieces & shared, const std::vector<prompt_pieces> & prefixes,
+                                  const std::vector<field_input> & inputs, const options & opt) {
+    if (opt.mode != "auto" && opt.mode != "tree" && opt.mode != "greedy") {
+        throw std::invalid_argument("mode must be auto, tree or greedy");
+    }
+    if (prefixes.empty()) {
         throw std::invalid_argument("a decision needs at least one context");
     }
-    const tokens_t shared = tokenize(shared_text, true);
-    std::vector<tokens_t> prefixes;
-    for (const auto & text : contexts) {
-        prefixes.push_back(tokenize(text, shared.empty()));
-        if (prefixes.back().empty()) {
+    for (const auto & p : prefixes) {
+        if (count_tokens(p) == 0) {
             throw std::invalid_argument("the decision context must not be empty");
         }
     }
+    const size_t    shared_tokens = count_tokens(shared);
+    const llama_pos shared_end    = count_pos(shared); // first position after the prefix
 
     std::vector<decision_field> fields;
     int total    = 0;
@@ -393,18 +569,19 @@ batch_result engine::decide_batch(const std::string & shared_text, const std::ve
     }
 
     batch_result out;
-    out.shared_tokens = shared.size();
-    out.rows          = total * (int) contexts.size();
-    out.items.resize(contexts.size());
+    out.shared_tokens       = shared_tokens;
+    out.shared_image_tokens = count_image_tokens(shared);
+    out.rows          = total * (int) prefixes.size();
+    out.items.resize(prefixes.size());
 
     const auto t0 = std::chrono::steady_clock::now();
     out.cache_hit = prepare_prefix(shared, opt.allow_cache);
     out.prefill_ms += ms_since(t0);
 
     // each context in a group holds one trunk sequence; the rest of the pool scores branches
-    const size_t per_group = std::clamp<size_t>(n_pool / (1 + branches), 1, contexts.size());
-    for (size_t g0 = 0; g0 < contexts.size(); g0 += per_group) {
-        const size_t n_group = std::min(per_group, contexts.size() - g0);
+    const size_t per_group = std::clamp<size_t>(n_pool / (1 + branches), 1, prefixes.size());
+    for (size_t g0 = 0; g0 < prefixes.size(); g0 += per_group) {
+        const size_t n_group = std::min(per_group, prefixes.size() - g0);
 
         const auto tp = std::chrono::steady_clock::now();
         std::vector<prompt_part> parts;
@@ -414,7 +591,7 @@ batch_result engine::decide_batch(const std::string & shared_text, const std::ve
             if (!shared.empty()) {
                 llama_memory_seq_cp(mem, seq_snap, trunk, -1, -1);
             }
-            parts.push_back({ &prefixes[g0 + i], (llama_pos) shared.size(), trunk });
+            parts.push_back({ &prefixes[g0 + i], shared_end, trunk });
         }
         decode_parts(parts);
         llama_synchronize(ctx); // llama_decode is asynchronous: wait for the prefill so its time isn't billed to scoring
@@ -430,7 +607,7 @@ batch_result engine::decide_batch(const std::string & shared_text, const std::ve
             std::vector<std::pair<size_t, size_t>> owner; // (context in group, field)
             for (size_t i = 0; i < n_group; ++i) {
                 const llama_seq_id trunk = seq_pool + (llama_seq_id) i;
-                const llama_pos    pos0  = (llama_pos) (shared.size() + prefixes[g0 + i].size());
+                const llama_pos    pos0  = shared_end + count_pos(prefixes[g0 + i]);
                 for (size_t f = 0; f < state[i].size(); ++f) {
                     auto & fd = state[i][f];
                     if (fd.use_tree) {
@@ -488,7 +665,9 @@ batch_result engine::decide_batch(const std::string & shared_text, const std::ve
         for (size_t i = 0; i < n_group; ++i) {
             llama_memory_seq_rm(mem, seq_pool + (llama_seq_id) i, -1, -1);
             result & r = out.items[g0 + i];
-            r.context_tokens = prefixes[g0 + i].size();
+            r.context_tokens       = count_tokens(prefixes[g0 + i]);
+            r.context_image_tokens = count_image_tokens(prefixes[g0 + i]);
+            r.shared_image_tokens  = out.shared_image_tokens;
             r.rows           = total;
             for (auto & fd : state[i]) {
                 if (fd.use_tree && fd.probs.empty()) {

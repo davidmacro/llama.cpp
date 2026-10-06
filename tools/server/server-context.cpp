@@ -2420,7 +2420,7 @@ private:
         }
         if (!decision_engine) {
             decision_engine = std::make_unique<llama_decision::engine>(ctx_tgt, (llama_seq_id) params_base.n_parallel,
-                                                                        params_base.n_seq_decision);
+                                                                        params_base.n_seq_decision, mctx);
         }
         const auto cs = llama_decision::compile_schema(body.at("schema"), body.value("instructions", std::string()));
         std::string shared;
@@ -2522,7 +2522,7 @@ private:
         }
         if (!decision_engine) {
             decision_engine = std::make_unique<llama_decision::engine>(ctx_tgt, (llama_seq_id) params_base.n_parallel,
-                                                                        params_base.n_seq_decision);
+                                                                        params_base.n_seq_decision, mctx);
         }
         const json & questions = tasks[group[0]].decision_request.at("questions");
         const auto   lay       = so::parse_layout(tasks[group[0]].decision_request.at("layout").get<std::string>());

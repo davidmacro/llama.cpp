@@ -9,10 +9,16 @@
 // evaluated in one batched llama_decode and cannot see each other. Small fields score every
 // divergence node of their token trie at once and return the exact constrained distribution;
 // larger fields walk the trie greedily.
+//
+// Prompts may carry images: a prompt is then a list of pieces, each either text tokens or an mtmd
+// image chunk. Text pieces are batched across sequences; image chunks are encoded with the
+// multimodal projector and decoded on their own sequence.
 
 #include "llama.h"
 #include "json.h"
+#include "mtmd.h"
 
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -22,6 +28,17 @@ struct common_chat_templates;
 namespace llama_decision {
 
 using tokens_t = std::vector<llama_token>;
+
+// One piece of a prompt: text tokens, or (when image is set) one media chunk from mtmd_tokenize.
+struct prompt_piece {
+    tokens_t                                toks;
+    std::shared_ptr<const mtmd_input_chunk> image;
+
+    size_t    n_tokens() const; // KV cells the piece occupies
+    llama_pos n_pos()    const; // positions it advances (differs from n_tokens for M-RoPE images)
+};
+
+using prompt_pieces = std::vector<prompt_piece>;
 
 // One field as the scorer sees it: the text before its value and the allowed value texts.
 struct field_input {
@@ -50,6 +67,8 @@ struct result {
     bool   cache_hit      = false;
     size_t shared_tokens  = 0;
     size_t context_tokens = 0;
+    size_t shared_image_tokens  = 0; // the image tokens counted in shared_tokens / context_tokens
+    size_t context_image_tokens = 0;
     int    rows           = 0;
     int    rounds         = 0;
     double prefill_ms     = 0;
@@ -62,6 +81,7 @@ struct batch_result {
     std::vector<result> items;
     bool   cache_hit     = false;
     size_t shared_tokens = 0;
+    size_t shared_image_tokens = 0;
     int    rows          = 0;
     int    rounds        = 0;
     double prefill_ms    = 0;
@@ -73,7 +93,8 @@ struct batch_result {
 // flight, then branches. The context needs a unified KV cache so branches share the trunk's cells.
 class engine {
   public:
-    engine(llama_context * ctx, llama_seq_id seq_base, int n_seqs);
+    // mctx (optional) encodes image pieces; without it only text prompts are accepted
+    engine(llama_context * ctx, llama_seq_id seq_base, int n_seqs, mtmd_context * mctx = nullptr);
 
     result decide(const std::string & shared_text, const std::string & context_text,
                   const std::vector<field_input> & fields, const options & opt);
@@ -83,11 +104,19 @@ class engine {
     batch_result decide_batch(const std::string & shared_text, const std::vector<std::string> & contexts,
                               const std::vector<field_input> & fields, const options & opt);
 
+    // The same on tokenized prompts: the shared prefix and every context as text and image pieces.
+    batch_result decide_batch(const prompt_pieces & shared, const std::vector<prompt_pieces> & contexts,
+                              const std::vector<field_input> & fields, const options & opt);
+
+    // Text with one media marker per bitmap (mtmd_tokenize) as pieces; plain text without bitmaps.
+    prompt_pieces tokenize_pieces(const std::string & text, const std::vector<const mtmd_bitmap *> & bitmaps,
+                                  bool add_special) const;
+
   private:
     struct prompt_part {
-        const tokens_t * toks;
-        llama_pos        pos0;
-        llama_seq_id     seq;
+        const prompt_pieces * pieces;
+        llama_pos             pos0;
+        llama_seq_id          seq;
     };
     struct branch {
         llama_seq_id trunk;
@@ -97,16 +126,19 @@ class engine {
     };
 
     llama_context     * ctx;
+    mtmd_context      * mctx;
     const llama_vocab * vocab;
     llama_memory_t      mem;
     llama_seq_id        seq_snap, seq_pool;
     int                 n_pool;
     bool                pad_branches; // recurrent/hybrid model: branches in a decode need equal lengths
-    tokens_t            cached;
+    prompt_pieces       cached;
+    llama_pos           cached_pos_max = -1; // last position of seq_snap right after the cached prefix was decoded
 
     tokens_t tokenize(const std::string & text, bool add_special) const;
     void     decode_parts(const std::vector<prompt_part> & parts);
-    bool     prepare_prefix(const tokens_t & shared, bool allow_cache);
+    void     decode_image(const mtmd_input_chunk * chunk, llama_pos pos0, llama_seq_id seq, std::string & encoded_id);
+    bool     prepare_prefix(const prompt_pieces & shared, bool allow_cache);
     std::vector<std::vector<float>> score_branches(const std::vector<branch> & branches, llama_seq_id first, int n_free);
 };
 
