@@ -246,9 +246,9 @@ int llama_server(common_params & params, int argc, char ** argv) {
         routes.post_rerank                 = models_routes->proxy_post;
         routes.post_decision               = models_routes->proxy_post;
         // validate here too, so a bad request gets the same 422 body as from a child
-        routes.post_systemone = [proxy = models_routes->proxy_post](const server_http_req & req) -> server_http_res_ptr {
+        routes.post_systemone = [proxy = models_routes->proxy_post, media_urls = params.systemone_media_urls](const server_http_req & req) -> server_http_res_ptr {
             json body;
-            const json errs = llama_decision::systemone::parse_request(req.body, body);
+            const json errs = llama_decision::systemone::parse_request(req.body, body, media_urls);
             if (!errs.empty()) {
                 auto res = std::make_unique<server_http_res>();
                 res->status = 422;

@@ -2486,7 +2486,13 @@ private:
 
         std::vector<std::string> keys;
         for (const auto & t : tasks) {
-            keys.push_back(t.decision_request.at("layout").get<std::string>() + t.decision_request.at("questions").dump());
+            // requests in a group share the cached prefix, so also its images (by content hash)
+            std::string key = t.decision_request.at("layout").get<std::string>() + t.decision_request.at("questions").dump();
+            for (const auto & bm : t.decision_shared_images) {
+                const char * id = mtmd_bitmap_get_id(bm.get());
+                key += std::string("\n") + (id ? id : "");
+            }
+            keys.push_back(std::move(key));
         }
         std::vector<bool> taken(tasks.size(), false);
         for (size_t i = 0; i < tasks.size(); ++i) {
@@ -2514,7 +2520,8 @@ private:
         }
     }
 
-    // tasks in group carry validated {"questions", "state" (rendered), "debug", "layout"}; all share questions and layout
+    // tasks in group carry validated {"questions", "state" (rendered), "debug", "layout"} and decoded images;
+    // all share questions, layout and shared images
     void handle_systemone(const std::vector<server_task> & tasks, const std::vector<size_t> & group) {
         namespace so = llama_decision::systemone;
         if (params_base.n_seq_decision < 3) {
@@ -2527,17 +2534,43 @@ private:
         const json & questions = tasks[group[0]].decision_request.at("questions");
         const auto   lay       = so::parse_layout(tasks[group[0]].decision_request.at("layout").get<std::string>());
         std::vector<std::string> states;
+        std::vector<size_t>      n_images;
+        bool                     any_images = !tasks[group[0]].decision_shared_images.empty();
         for (size_t j : group) {
             states.push_back(tasks[j].decision_request.at("state").get<std::string>());
+            n_images.push_back(tasks[j].decision_images.size());
+            any_images = any_images || n_images.back() > 0;
         }
-        const auto   pr      = so::build(chat_params.tmpls.get(), chat_params.use_jinja, questions, states, lay);
+        auto pr = so::build(chat_params.tmpls.get(), chat_params.use_jinja, questions, states, lay);
+        if (any_images) {
+            so::add_images(pr, get_media_marker(), tasks[group[0]].decision_shared_images.size(), n_images);
+        }
         const auto & cs      = pr.cs;
         const auto & shared  = pr.shared;
         const auto & dynamic = pr.contexts;
 
         llama_decision::options opt;
         opt.mode = "tree"; // every answer needs the full distribution
-        const auto b    = decision_engine->decide_batch(shared, dynamic, cs.inputs, opt);
+        llama_decision::batch_result b;
+        if (!any_images) {
+            b = decision_engine->decide_batch(shared, dynamic, cs.inputs, opt);
+        } else {
+            // text and image pieces: the shared images end the cached prefix, each request's images start its part
+            auto bitmaps = [](const std::vector<std::shared_ptr<mtmd_bitmap>> & v) {
+                std::vector<const mtmd_bitmap *> out;
+                for (const auto & bm : v) {
+                    out.push_back(bm.get());
+                }
+                return out;
+            };
+            const auto shared_pieces = decision_engine->tokenize_pieces(shared, bitmaps(tasks[group[0]].decision_shared_images), true);
+            std::vector<llama_decision::prompt_pieces> context_pieces;
+            for (size_t k = 0; k < group.size(); ++k) {
+                context_pieces.push_back(decision_engine->tokenize_pieces(dynamic[k], bitmaps(tasks[group[k]].decision_images),
+                                                                          shared_pieces.empty()));
+            }
+            b = decision_engine->decide_batch(shared_pieces, context_pieces, cs.inputs, opt);
+        }
         const auto mode = so::parse_confidence(params_base.systemone_confidence);
 
         for (size_t k = 0; k < group.size(); ++k) {
@@ -2557,6 +2590,8 @@ private:
                     { "cache_hit",      b.cache_hit },
                     { "shared_tokens",  (long long) b.shared_tokens },
                     { "context_tokens", (long long) item.context_tokens },
+                    { "shared_image_tokens",  (long long) b.shared_image_tokens },  // included in shared_tokens
+                    { "context_image_tokens", (long long) item.context_image_tokens }, // included in context_tokens
                     { "scored_rows",    item.rows },
                     { "rounds",         b.rounds },
                     { "prefill_ms",     b.prefill_ms },
@@ -5425,7 +5460,7 @@ void server_routes::init_routes() {
         };
 
         json body;
-        const json errs = so::parse_request(req.body, body);
+        const json errs = so::parse_request(req.body, body, params.systemone_media_urls);
         if (!errs.empty()) {
             fail(422, errs);
             return res;
@@ -5448,6 +5483,54 @@ void server_routes::init_routes() {
         data["layout"]    = body.value("x_layout", params.systemone_layout);
 
         server_task task(SERVER_TASK_TYPE_SYSTEMONE);
+
+        // images are decoded here, on the HTTP thread (mtmd_helper_bitmap_init_from_buf is thread-safe)
+        const size_t n_images = body.value("x_images", json::array()).size() + body.value("x_shared_images", json::array()).size();
+        if (n_images > 0) {
+            if (ctx_server.mctx == nullptr || !mtmd_support_vision(ctx_server.mctx)) {
+                fail(400, "This server does not accept images: start it with a vision model and --mmproj");
+                return res;
+            }
+            json img_errs = json::array();
+            for (const char * key : { "x_shared_images", "x_images" }) {
+                auto & out  = std::string(key) == "x_images" ? task.decision_images : task.decision_shared_images;
+                const json refs = body.value(key, json::array());
+                for (size_t i = 0; i < refs.size(); ++i) {
+                    const std::string ref = refs.at(i).get<std::string>();
+                    std::string msg;
+                    try {
+                        std::vector<raw_buffer> files;
+                        handle_media(files, ref, params.media_path);
+                        auto w = mtmd_helper_bitmap_init_from_buf(ctx_server.mctx, files.at(0).data(), files.at(0).size(),
+                                                                  false, ctx_server.init_opt);
+                        if (w.video_ctx != nullptr) {
+                            mtmd_helper_video_free(w.video_ctx);
+                        }
+                        std::shared_ptr<mtmd_bitmap> bm(w.bitmap, mtmd_bitmap_free);
+                        if (!bm || w.video_ctx != nullptr || mtmd_bitmap_is_audio(bm.get())) {
+                            msg = "the data is not an image the server can decode";
+                        } else {
+                            out.push_back(std::move(bm));
+                        }
+                    } catch (const std::exception & e) {
+                        msg = e.what();
+                    }
+                    if (!msg.empty()) {
+                        img_errs.push_back({
+                            { "type",  "value_error" },
+                            { "loc",   json::array({ "body", key, (int64_t) i }) },
+                            { "msg",   "Value error, " + msg },
+                            { "input", so::summarize_ref(ref) },
+                        });
+                    }
+                }
+            }
+            if (!img_errs.empty()) {
+                fail(422, img_errs);
+                return res;
+            }
+        }
+
         task.id               = res->rd.get_new_id();
         task.decision_request = data;
         res->rd.post_task(std::move(task));

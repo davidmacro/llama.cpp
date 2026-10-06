@@ -511,6 +511,7 @@ struct common_params {
     std::string model_release_date;        // YYYY-MM-DD, shown by GET /v1/models (System One)              // NOLINT
     std::string systemone_confidence = "entropy"; // /v1/systemone confidence: entropy or max           // NOLINT
     std::string systemone_layout = "questions-first"; // /v1/systemone prompt layout: questions-first or state-first // NOLINT
+    bool        systemone_media_urls = false; // /v1/systemone: accept http(s):// and file:// image references (SSRF risk) // NOLINT
     std::string hf_token             = ""; // HF token (aka bearer token)                                   // NOLINT
     std::string prompt               = "";                                                                  // NOLINT
     std::string system_prompt        = "";                                                                  // NOLINT

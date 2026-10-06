@@ -3075,6 +3075,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SYSTEMONE_LAYOUT"));
     add_opt(common_arg(
+        {"--systemone-media-urls"},
+        "accept http(s):// image URLs (fetched by the server) and file:// references (needs --media-path) in /v1/systemone x_images and x_shared_images (default: only data URIs and raw base64)",
+        [](common_params & params) {
+            params.systemone_media_urls = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SYSTEMONE_MEDIA_URLS"));
+    add_opt(common_arg(
         {"-m", "--model"}, "FNAME",
         ex == LLAMA_EXAMPLE_EXPORT_LORA
             ? "model path from which to load base model"

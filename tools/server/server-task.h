@@ -7,6 +7,7 @@
 #include <unordered_set>
 #include <list>
 #include <map>
+#include <memory>
 
 // TODO: prevent including the whole server-common.h as we only use server_tokens
 #include "server-common.h"
@@ -176,6 +177,10 @@ struct server_task {
 
     // used by SERVER_TASK_TYPE_DECISION: the request body; SERVER_TASK_TYPE_SYSTEMONE: questions, rendered state, debug
     json decision_request;
+
+    // used by SERVER_TASK_TYPE_SYSTEMONE: decoded x_images / x_shared_images (bitmap ids are content hashes)
+    std::vector<std::shared_ptr<mtmd_bitmap>> decision_images;
+    std::vector<std::shared_ptr<mtmd_bitmap>> decision_shared_images;
 
     // used by SERVER_TASK_TYPE_SET_LORA
     std::map<int, float> set_lora; // mapping adapter ID -> scale

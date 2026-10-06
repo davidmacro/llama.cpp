@@ -9,6 +9,10 @@
 // Extension: a choice question may set "x_labels": "names" (default, the model writes the option
 // name), "letters" (A..Z) or "numbers" (1..N), listed next to each name in the prompt. Answers
 // stay keyed by the option names.
+//
+// Extension: "x_images" (per request) and "x_shared_images" (part of the cached prefix, e.g. reference
+// images) are lists of data:image/...;base64 URIs or raw base64, placed at the start of the user turn:
+// shared images, then the request's images, then the state.
 
 #include "decision-engine.h"
 #include "json.h"
@@ -21,6 +25,7 @@ namespace systemone {
 // local policy, not part of the official schema
 constexpr size_t max_questions = 32;
 constexpr size_t max_options   = 255;
+constexpr size_t max_images    = 16; // per list (x_images, x_shared_images)
 
 enum class confidence_mode {
     entropy, // 1 - normalised entropy of the distribution
@@ -31,13 +36,14 @@ enum class confidence_mode {
 confidence_mode parse_confidence(const std::string & name);
 
 // FastAPI style validation errors: [{"type", "loc", "msg", "input", "ctx"}]; empty when valid.
-common_json validate(const common_json & body);
+// allow_media_urls: accept http(s):// and file:// image references (server flag --systemone-media-urls).
+common_json validate(const common_json & body, bool allow_media_urls = false);
 
 // Errors for a body that is empty or is not valid JSON.
 common_json body_errors(const std::string & body, const std::string & parse_error);
 
 // Parses and validates a request body into parsed; returns the errors (empty when valid).
-common_json parse_request(const std::string & body, common_json & parsed);
+common_json parse_request(const std::string & body, common_json & parsed, bool allow_media_urls = false);
 
 // Response body of a failed request: {"detail": detail}.
 std::string error_body(const common_json & detail);
@@ -75,6 +81,13 @@ struct prompt {
 // Everything decide_batch needs for validated questions and rendered states.
 prompt build(const common_chat_templates * tmpls, bool use_jinja, const common_json & questions,
              const std::vector<std::string> & states, layout lay);
+
+// Puts one media marker per image at the start of the user turn: n_shared at the end of the cached
+// prefix (before every layout's state), n_per_state[k] at the start of state k's part.
+void add_images(prompt & pr, const std::string & marker, size_t n_shared, const std::vector<size_t> & n_per_state);
+
+// An image reference shortened for error messages.
+common_json summarize_ref(const std::string & ref);
 
 // The "answers" object for validated questions, in request order.
 common_json answers(const common_json & questions, const result & r, confidence_mode mode);

@@ -175,7 +175,13 @@ These extend the official schema and are opt-in.
   | `state-first` | the state, then only its own question (as llamacpp-jev lays it out) |
   | `state-first-context` | as `state-first`, plus one line naming the other questions |
 
-- **`?debug=1`** adds `x_debug` to the response: timings, batch size, cache hit, scored rows, the system prompt, the full rendered prompt (`prompt_prefix` + `prompt_state`) and per question the text it is scored after and its candidates (`fields`).
+- **`x_images`** and **`x_shared_images`** on the request: lists (at most 16 each) of images as `data:image/<type>;base64,...`
+  URIs or raw base64. Needs a vision model started with `--mmproj` (otherwise 400). The images open the user turn:
+  `x_shared_images` first, as part of the cached prefix (reference images, logos, examples; requests with the same
+  shared images share the cache and are batched together), then the request's own `x_images`, then the state. This
+  holds for every layout. A bad reference gets a 422 at `["body", "x_images", i]`. http(s) and `file://` references
+  are refused unless the server runs with `--systemone-media-urls`. `usage.input_tokens` includes the image tokens.
+- **`?debug=1`** adds `x_debug` to the response: timings, batch size, cache hit, scored rows, image tokens (`shared_image_tokens`, `context_image_tokens`), the system prompt, the full rendered prompt (`prompt_prefix` + `prompt_state`, images shown as media markers) and per question the text it is scored after and its candidates (`fields`).
 
 ### `GET /v1/models`
 
@@ -196,6 +202,7 @@ as `decision-seqs`, `model-description` and `model-release-date` can be set per 
 | `--decision-seqs N` | 0 (off) | Sequences reserved for decisions; required, at least 3. Size it to about `(1 + questions) x concurrent requests`. Too few splits a batch into sequential groups. |
 | `--systemone-confidence` | `entropy` | `entropy` or `max`. |
 | `--systemone-layout` | `questions-first` | Default prompt layout: `questions-first` or `state-first` (see `x_layout`). |
+| `--systemone-media-urls` | off | Also accept http(s) image URLs (fetched by the server) and `file://` references (with `--media-path`) in `x_images` / `x_shared_images`. Lets clients make the server fetch URLs (SSRF): enable only for trusted clients. |
 | `--model-description` | GGUF `general.description` | `description` in `/v1/models`. |
 | `--model-release-date` | model file date | `release_date` in `/v1/models`. |
 | `-a, --alias` | | Extra model names, e.g. `jev-latest`. |

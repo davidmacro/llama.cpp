@@ -451,3 +451,68 @@ def test_systemone_state_first_context_layout():
     f = {x["question"]: x for x in d["fields"]}
     assert 'Asked separately about the same content: "department"' in f["refund_requested"]["suffix"]
     assert "Allowed answers:\n- \"billing\"" not in f["refund_requested"]["suffix"]  # the other questions' options stay out
+
+
+# ---- images (x_images / x_shared_images); tinygemma3 has a vision mmproj
+
+def png_data_uri(rgb: tuple, size: int = 32) -> str:
+    """A solid colour PNG, built with the standard library."""
+    import base64, struct, zlib
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    raw = b"".join(b"\x00" + bytes(rgb) * size for _ in range(size))
+    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)) +
+           chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+    return "data:image/png;base64," + base64.b64encode(png).decode()
+
+
+def vision_server() -> ServerProcess:
+    s = ServerPreset.tinygemma3()
+    s.decision_seqs = 8
+    s.n_ctx = 2048
+    return s
+
+
+IMAGE_REQ = dict(EXAMPLE, model="tinygemma3")
+
+
+@pytest.mark.parametrize("layout", ["questions-first", "state-first"])
+def test_systemone_x_images(layout):
+    global server
+    server = vision_server()
+    server.start()
+    req = dict(IMAGE_REQ, x_images=[png_data_uri((255, 0, 0))], x_layout=layout)
+    res = server.make_request("POST", "/v1/systemone?debug=1", data=req)
+    assert res.status_code == 200, res.body
+    body = dict(res.body)
+    d = body.pop("x_debug")
+    check_answers(IMAGE_REQ, body)
+    assert d["context_image_tokens"] > 0 and d["shared_image_tokens"] == 0
+    assert body["usage"]["input_tokens"] == d["shared_tokens"] + d["context_tokens"]
+
+
+def test_systemone_x_shared_images():
+    global server
+    server = vision_server()
+    server.start()
+    req = dict(IMAGE_REQ, x_shared_images=[png_data_uri((0, 0, 255))])
+    a = server.make_request("POST", "/v1/systemone?debug=1", data=req)
+    b = server.make_request("POST", "/v1/systemone?debug=1", data=dict(req, state="Another ticket about a refund."))
+    for res in (a, b):
+        assert res.status_code == 200, res.body
+        body = dict(res.body)
+        d = body.pop("x_debug")
+        check_answers(IMAGE_REQ, body)
+        assert d["shared_image_tokens"] > 0 and d["context_image_tokens"] == 0
+    assert b.body["x_debug"]["cache_hit"]  # the shared image is part of the cached prefix
+
+
+def test_systemone_bad_image_ref():
+    global server
+    server = vision_server()
+    server.start()
+    res = server.make_request("POST", "/v1/systemone", data=dict(IMAGE_REQ, x_images=["https://example.com/a.png"]))
+    assert res.status_code == 422, res.body
+    assert res.body["detail"][0]["loc"] == ["body", "x_images", 0]

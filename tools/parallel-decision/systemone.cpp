@@ -219,7 +219,73 @@ size_t argmax(const std::vector<double> & p) {
     return (size_t) (std::max_element(p.begin(), p.end()) - p.begin());
 }
 
+// ---------------------------------------------------------------- images
+
+bool starts_with(const std::string & s, const char * prefix) {
+    return s.rfind(prefix, 0) == 0;
+}
+
+// standard alphabet, optional '=' padding at the end only
+bool is_base64(const std::string & s, size_t from) {
+    size_t end = s.size();
+    while (end > from && s[end - 1] == '=' && s.size() - end < 2) {
+        --end;
+    }
+    if (end == from) {
+        return false;
+    }
+    for (size_t i = from; i < end; ++i) {
+        const char c = s[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// why an image reference is unusable, or "" if it may be loaded
+std::string image_ref_error(const std::string & ref, bool allow_media_urls) {
+    if (starts_with(ref, "http://") || starts_with(ref, "https://") || starts_with(ref, "file://")) {
+        return allow_media_urls ? ""
+            : "image URLs are disabled on this server (--systemone-media-urls); send a data:image/...;base64 URI or raw base64";
+    }
+    if (starts_with(ref, "data:")) {
+        const size_t comma = ref.find(',');
+        if (!starts_with(ref, "data:image/") || comma == std::string::npos) {
+            return "a data URI must have the form data:image/<type>;base64,<data>";
+        }
+        const std::string head = ref.substr(0, comma);
+        if (head.size() < 7 || head.compare(head.size() - 7, 7, ";base64") != 0 || !is_base64(ref, comma + 1)) {
+            return "a data URI must hold base64 data: data:image/<type>;base64,<data>";
+        }
+        return "";
+    }
+    if (!is_base64(ref, 0)) {
+        return "an image must be a data:image/<type>;base64,<data> URI or raw base64";
+    }
+    return "";
+}
+
 } // namespace
+
+common_json summarize_ref(const std::string & ref) {
+    return ref.size() <= 64 ? ref : ref.substr(0, 64) + "...";
+}
+
+void add_images(prompt & pr, const std::string & marker, size_t n_shared, const std::vector<size_t> & n_per_state) {
+    std::string shared;
+    for (size_t i = 0; i < n_shared; ++i) {
+        shared += marker + "\n";
+    }
+    pr.shared += shared;
+    for (size_t k = 0; k < pr.contexts.size() && k < n_per_state.size(); ++k) {
+        std::string own;
+        for (size_t i = 0; i < n_per_state[k]; ++i) {
+            own += marker + "\n";
+        }
+        pr.contexts[k] = own + pr.contexts[k];
+    }
+}
 
 confidence_mode parse_confidence(const std::string & name) {
     if (name == "entropy") {
@@ -231,7 +297,7 @@ confidence_mode parse_confidence(const std::string & name) {
     throw std::invalid_argument("confidence must be entropy or max");
 }
 
-common_json validate(const common_json & body) {
+common_json validate(const common_json & body, bool allow_media_urls) {
     errors errs;
     const common_json root = common_json::array({ "body" });
     if (!body.is_object()) {
@@ -271,6 +337,35 @@ common_json validate(const common_json & body) {
         }
     }
 
+    // extension: images (see image_ref_error)
+    for (const char * key : { "x_images", "x_shared_images" }) {
+        if (!body.contains(key)) {
+            continue;
+        }
+        const common_json & v  = body.at(key);
+        const common_json   lk = at_key(root, key);
+        if (!v.is_array()) {
+            errs.add(lk, "list_type", "Input should be a valid list", v);
+            continue;
+        }
+        if (v.size() > max_images) {
+            errs.add(lk, "too_long", "List should have at most " + std::to_string(max_images) + " items after validation, not " +
+                     std::to_string(v.size()), v,
+                     common_json{ { "field_type", "List" }, { "max_length", (int64_t) max_images }, { "actual_length", (int64_t) v.size() } });
+            continue;
+        }
+        for (size_t i = 0; i < v.size(); ++i) {
+            if (!v.at(i).is_string()) {
+                errs.add(at_idx(lk, i), "string_type", "Input should be a valid string", v.at(i));
+                continue;
+            }
+            const std::string msg = image_ref_error(v.at(i).get<std::string>(), allow_media_urls);
+            if (!msg.empty()) {
+                errs.add(at_idx(lk, i), "value_error", "Value error, " + msg, summarize_ref(v.at(i).get<std::string>()));
+            }
+        }
+    }
+
     // extension: prompt layout for this request (see layout)
     if (body.contains("x_layout")) {
         const common_json & v = body.at("x_layout");
@@ -303,13 +398,13 @@ common_json body_errors(const std::string & body, const std::string & parse_erro
     return errs.list;
 }
 
-common_json parse_request(const std::string & body, common_json & parsed) {
+common_json parse_request(const std::string & body, common_json & parsed, bool allow_media_urls) {
     try {
         parsed = common_json::parse(body);
     } catch (const common_json_error & e) {
         return body_errors(body, e.what());
     }
-    return validate(parsed);
+    return validate(parsed, allow_media_urls);
 }
 
 std::string error_body(const common_json & detail) {
