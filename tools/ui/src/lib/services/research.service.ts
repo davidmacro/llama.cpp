@@ -88,7 +88,9 @@ export function cleanSpec(spec: DesignSpec): DesignSpec {
 			// drop empty variant lines left over from editing
 			selectors: g.selectors.map((s) =>
 				s.kind === 'variant_list' ? { kind: s.kind, texts: s.texts.filter((t) => t.length > 0) } : s
-			)
+			),
+			// provenance note; the server stores the spec verbatim and ignores it
+			...(g.approx_ids?.length ? { approx_ids: g.approx_ids } : {})
 		})),
 		watch_extra_token_ids: spec.watch_extra_token_ids,
 		unknown_multi_token_policy: spec.unknown_multi_token_policy

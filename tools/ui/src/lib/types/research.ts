@@ -38,8 +38,12 @@ export interface DesignGroup {
 	name: string;
 	role: GroupRole;
 	selectors: Selector[];
-	/** UI only; the server ignores unknown keys (or we strip it). */
+	/** UI only; stripped before sending. */
 	color?: string;
+	/** UI only; stable key while the id follows the name. */
+	uid?: string;
+	/** Token ids added as "first token of a multi-token word" (approximate members). */
+	approx_ids?: number[];
 }
 
 export interface DesignSpec {
@@ -195,12 +199,17 @@ export interface RunSummary {
 	skipped: number;
 	dropped: number;
 	text: string;
+	error?: string | null;
+	created_at?: string;
 	started_at?: string;
 	ended_at?: string;
 }
 
 export interface RunManifest extends RunSummary {
 	prompt?: string;
+	chat?: boolean;
+	n_predict?: number;
+	design_id?: string;
 	rendered_prompt?: string;
 	sampling?: Record<string, unknown>;
 	collection?: { every_n: number; mode: CollectionMode; top_k: number };
@@ -271,3 +280,11 @@ export interface CounterfactualResult {
 }
 
 export type MetricKey = 'lse' | 'rel' | 'abs';
+
+/** Compact per-run result used by the batch matrix (first captured position). */
+export interface RunDigest {
+	groupName: string | null;
+	groupId: string | null;
+	mass: number | null;
+	massKind: 'abs' | 'rel';
+}

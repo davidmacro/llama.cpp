@@ -14,16 +14,42 @@ import type {
 	ResearchProposal,
 	ResearchQuestion,
 	ResearchStatus,
+	RunDigest,
 	RunManifest,
 	RunSummary,
-	RunToken
+	RunToken,
+	TokenInfo
 } from '$lib/types/research';
-import { groupColor, slugId } from '$lib/utils/research';
-import { SvelteMap } from 'svelte/reactivity';
+import { groupColor, runTime, slugId, topGroup } from '$lib/utils/research';
+import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 
 export type ResearchTab = 'question' | 'design' | 'interventions' | 'launch' | 'runs' | 'compare';
 
 const FLUSH_MS = 100; // ~10 FPS render cadence for live runs
+const POLL_MS = 1500; // run list refresh while runs are queued/running
+
+const ACTIVE = new Set(['queued', 'running']);
+const HIDDEN_KEY = 'research.hiddenInterventions';
+
+export interface BatchInfo {
+	id: string;
+	time: string;
+	arms: string[];
+	seeds: number[];
+	runs: RunSummary[];
+}
+
+function loadHidden(): string[] {
+	try {
+		const v = JSON.parse(localStorage.getItem(HIDDEN_KEY) ?? '[]');
+		return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
+	} catch {
+		return [];
+	}
+}
+
+let uidSeq = 0;
+const nextUid = () => `g${++uidSeq}`;
 
 export function emptySpec(): DesignSpec {
 	return {
@@ -66,8 +92,11 @@ export class RunView {
 	#evCount = 0;
 	#evWindowStart = 0;
 
-	constructor(id: string) {
+	onFinish: (() => void) | null = null;
+
+	constructor(id: string, onFinish?: () => void) {
 		this.id = id;
+		this.onFinish = onFinish ?? null;
 	}
 
 	async open(): Promise<void> {
@@ -165,6 +194,7 @@ export class RunView {
 			this.counters = { captured: f.captured, skipped: f.skipped, dropped: f.dropped };
 			this.text = f.text;
 			this.#pendingFinish = null;
+			this.onFinish?.();
 		} else if (this.live) {
 			this.counters = {
 				captured: this.observations.length,
@@ -215,6 +245,15 @@ class ResearchStore {
 	interventionId = $state<string | null>(null);
 	effectiveBias = $state.raw<EffectiveBias | null>(null);
 
+	/** Batch shown in the results matrix (null = latest). */
+	batchPick = $state<string | null>(null);
+	/** Matrix digests per finished run (runs are immutable once finished). */
+	digests = new SvelteMap<string, RunDigest>();
+	#digestPending = new Set<string>();
+
+	/** Interventions hidden in the UI only (localStorage). */
+	hiddenIvs = new SvelteSet<string>(typeof localStorage === 'undefined' ? [] : loadHidden());
+
 	/** Opened runs (inspector / compare). */
 	views = new SvelteMap<string, RunView>();
 	selectedRunId = $state<string | null>(null);
@@ -222,6 +261,135 @@ class ResearchStore {
 
 	busy = $state(false);
 	error = $state<string | null>(null);
+
+	/** Token piece cache shared by all views (fetched once per id). */
+	tokenCache = new SvelteMap<number, TokenInfo>();
+	#tokenPending = new Set<number>();
+	#pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+	/** Display name of a group id (draft first, then saved designs). */
+	groupName(id: string): string {
+		const g = this.draft.groups.find((x) => x.id === id);
+		if (g) return g.name;
+		for (const d of this.designs) {
+			const dg = d.spec.groups.find((x) => x.id === id);
+			if (dg) return dg.name;
+		}
+		return id;
+	}
+
+	ensureTokens(ids: number[]): void {
+		const missing = ids.filter((id) => !this.tokenCache.has(id) && !this.#tokenPending.has(id));
+		if (missing.length === 0) return;
+		for (const id of missing) this.#tokenPending.add(id);
+		for (const id of missing)
+			ResearchService.token(id)
+				.then((t) => this.tokenCache.set(id, t))
+				.catch(() => null)
+				.finally(() => this.#tokenPending.delete(id));
+	}
+
+	/** Poll /runs while any listed run is queued/running; stops by itself. */
+	pollRuns(): void {
+		if (this.#pollTimer || !this.runs.some((r) => ACTIVE.has(r.status))) return;
+		this.#pollTimer = setTimeout(() => {
+			this.#pollTimer = null;
+			void this.syncRuns();
+		}, POLL_MS);
+	}
+
+	/** Silent run list refresh, then keep polling if needed. */
+	async syncRuns(): Promise<void> {
+		const qid = this.question?.id;
+		if (!qid) return;
+		try {
+			const runs = (await ResearchService.listRuns(qid)).runs;
+			if (this.question?.id === qid) this.runs = runs;
+		} catch {
+			// transient; retried on the next poll
+		}
+		this.pollRuns();
+	}
+
+	/** A = control, B = first treatment with the same seed (only when empty). */
+	prefillCompare(): void {
+		if (this.compareIds[0] || this.compareIds[1]) return;
+		const control = this.runs.find((r) => !r.intervention_id);
+		if (!control) return;
+		const treat =
+			this.runs.find(
+				(r) => r.intervention_id && r.seed === control.seed && r.batch_id === control.batch_id
+			) ?? this.runs.find((r) => r.intervention_id && r.seed === control.seed);
+		this.openRun(control.id);
+		if (treat) this.openRun(treat.id);
+		this.compareIds = [control.id, treat?.id ?? null];
+	}
+
+	/** Batches derived from the run list, newest first. */
+	batches = $derived.by((): BatchInfo[] => {
+		const map = new Map<string, BatchInfo>();
+		for (const r of this.runs) {
+			let b = map.get(r.batch_id);
+			if (!b) {
+				b = { id: r.batch_id, time: runTime(r), arms: [], seeds: [], runs: [] };
+				map.set(r.batch_id, b);
+			}
+			b.runs.push(r);
+			const t = runTime(r);
+			if (t && (!b.time || t < b.time)) b.time = t;
+			if (!b.arms.includes(r.arm)) b.arms.push(r.arm);
+			if (!b.seeds.includes(r.seed)) b.seeds.push(r.seed);
+		}
+		for (const b of map.values()) {
+			b.seeds.sort((x, y) => x - y);
+			// control first, then in run order
+			b.arms.sort((x, y) => (x === 'control' ? -1 : y === 'control' ? 1 : 0));
+		}
+		return [...map.values()].sort((a, b) => (a.time < b.time ? 1 : a.time > b.time ? -1 : 0));
+	});
+
+	batch = $derived(this.batches.find((b) => b.id === this.batchPick) ?? this.batches[0] ?? null);
+
+	/** Fetch observations once per finished run and keep the first-position digest. */
+	ensureDigests(runs: RunSummary[]): void {
+		for (const r of runs) {
+			if (ACTIVE.has(r.status) || this.digests.has(r.id) || this.#digestPending.has(r.id)) continue;
+			this.#digestPending.add(r.id);
+			ResearchService.runObservations(r.id)
+				.then((o) => {
+					const top = topGroup(o.observations[0]);
+					this.digests.set(r.id, {
+						groupId: top?.id ?? null,
+						groupName: top ? (o.groups.find((g) => g.id === top.id)?.name ?? top.id) : null,
+						mass: top?.mass ?? null,
+						massKind: top?.kind ?? 'rel'
+					});
+				})
+				.catch(() => null)
+				.finally(() => this.#digestPending.delete(r.id));
+		}
+	}
+
+	toggleHidden(id: string): void {
+		if (this.hiddenIvs.has(id)) this.hiddenIvs.delete(id);
+		else this.hiddenIvs.add(id);
+		try {
+			localStorage.setItem(HIDDEN_KEY, JSON.stringify([...this.hiddenIvs]));
+		} catch {
+			// storage unavailable: hiding lasts for this session only
+		}
+	}
+
+	/** Inspector action: add a token id to a draft group and open the builder. */
+	addTokenToGroup(groupId: string, tokenId: number): void {
+		const g = this.draft.groups.find((x) => x.id === groupId);
+		if (!g) return;
+		const sel = g.selectors.find((s) => s.kind === 'token_ids');
+		if (!sel) g.selectors.push({ kind: 'token_ids', ids: [tokenId] });
+		else if (sel.kind === 'token_ids' && !sel.ids.includes(tokenId)) sel.ids.push(tokenId);
+		this.tab = 'design';
+		void this.compilePreview();
+	}
 
 	get design(): ResearchDesign | null {
 		return this.designs.find((d) => d.id === this.designId) ?? null;
@@ -301,9 +469,15 @@ class ResearchStore {
 			this.ruleDraft = [];
 			this.preview = null;
 			this.effectiveBias = null;
+			this.batchPick = null;
 			await this.refreshQuestionData();
 			const latest = this.designs[this.designs.length - 1];
 			if (latest) this.loadDesignIntoDraft(latest);
+			const iv = this.interventions.filter((i) => i.design_id === this.designId && !this.hiddenIvs.has(i.id)).at(-1);
+			if (iv) {
+				this.interventionId = iv.id;
+				this.effectiveBias = await ResearchService.effectiveBias(iv.id).catch(() => null);
+			}
 		});
 	}
 
@@ -320,6 +494,7 @@ class ResearchStore {
 		this.interventions = i.interventions;
 		this.proposals = p.proposals;
 		this.runs = r.runs;
+		this.pollRuns();
 	}
 
 	async refreshRuns(): Promise<void> {
@@ -328,16 +503,21 @@ class ResearchStore {
 		await this.run(async () => {
 			this.runs = (await ResearchService.listRuns(id)).runs;
 		});
+		this.pollRuns();
 	}
 
 	loadDesignIntoDraft(d: ResearchDesign): void {
 		this.designId = d.id;
 		const spec = structuredClone($state.snapshot(d.spec)) as DesignSpec;
-		spec.groups.forEach((g, i) => (g.color = g.color ?? groupColor(i)));
+		spec.groups.forEach((g, i) => {
+			g.color = g.color ?? groupColor(i);
+			g.uid = nextUid();
+		});
 		spec.watch_extra_token_ids ??= [];
 		spec.unknown_multi_token_policy ??= 'flag_and_exclude';
 		this.draft = spec;
 		this.preview = d.compiled ?? null;
+		if (!this.preview && spec.groups.length) void this.compilePreview();
 	}
 
 	addGroup(name = 'GROUP', role: DesignGroup['role'] = 'target'): DesignGroup {
@@ -347,10 +527,36 @@ class ResearchStore {
 			name,
 			role,
 			selectors: [],
-			color: groupColor(this.draft.groups.length)
+			color: groupColor(this.draft.groups.length),
+			uid: nextUid()
 		};
 		this.draft.groups.push(g);
-		return g;
+		// return the reactive proxy so later mutations are tracked
+		return this.draft.groups[this.draft.groups.length - 1];
+	}
+
+	/** Rename; while the design is unsaved the id follows the name. */
+	renameGroup(g: DesignGroup, name: string): void {
+		g.name = name;
+		if (this.designId) return;
+		const taken = new Set(this.draft.groups.filter((x) => x !== g).map((x) => x.id));
+		const old = g.id;
+		const id = slugId(name, taken);
+		if (id === old) return;
+		g.id = id;
+		for (const r of this.ruleDraft) if (r.target_group_id === old) r.target_group_id = id;
+	}
+
+	/** Add the first token of a multi-token word as an approximate member, then recompile. */
+	async useFirstToken(groupId: string, tokenId: number): Promise<void> {
+		const g = this.draft.groups.find((x) => x.id === groupId);
+		if (!g) return;
+		const sel = g.selectors.find((s) => s.kind === 'token_ids');
+		if (!sel) g.selectors.push({ kind: 'token_ids', ids: [tokenId] });
+		else if (sel.kind === 'token_ids' && !sel.ids.includes(tokenId)) sel.ids.push(tokenId);
+		g.approx_ids ??= [];
+		if (!g.approx_ids.includes(tokenId)) g.approx_ids.push(tokenId);
+		await this.compilePreview();
 	}
 
 	/** Fill builders from an untrusted proposal. Only text pieces, never IDs. */
@@ -359,19 +565,23 @@ class ResearchStore {
 		this.designId = null;
 		this.preview = null;
 		const nameToId = new Map<string, string>();
+		const targets = new Set<string>();
 		for (const og of p.observation_groups) {
 			const g = this.addGroup(og.name, og.role);
-			const pieces = og.candidate_pieces.filter((s) => typeof s === 'string' && s.length > 0);
+			const pieces = cleanPieces(og.candidate_pieces);
 			if (pieces.length) g.selectors.push({ kind: 'variant_list', texts: pieces });
 			nameToId.set(og.name, g.id);
+			if (og.role === 'target') targets.add(og.name);
 		}
+		// only add_logit_bias on target groups; never exclude
 		this.ruleDraft = p.intervention_proposals
-			.filter((ip) => nameToId.has(ip.target_group))
+			.filter((ip) => nameToId.has(ip.target_group) && targets.has(ip.target_group))
+			.filter((ip) => ip.operation === 'add_logit_bias' && Number.isFinite(Number(ip.delta)))
 			.map((ip, i) => ({
 				id: `r${i + 1}`,
 				target_group_id: nameToId.get(ip.target_group)!,
-				operation: ip.operation,
-				delta: Number(ip.delta) || 0,
+				operation: 'add_logit_bias' as const,
+				delta: Number(ip.delta),
 				enabled: true
 			}));
 		this.interventionId = null;
@@ -432,16 +642,23 @@ class ResearchStore {
 			let iv = await ResearchService.createIntervention(qid, did, rules);
 			if (approve) iv = await ResearchService.approveIntervention(iv.id);
 			this.interventions = (await ResearchService.listInterventions(qid)).interventions;
+			// the editor starts over; the saved one is shown in Effective bias
 			this.interventionId = iv.id;
+			this.ruleDraft = [];
 			this.effectiveBias = await ResearchService.effectiveBias(iv.id);
 		});
+	}
+
+	/** Copy a saved intervention's rules into the editor as a new draft. */
+	duplicateIntervention(id: string): void {
+		const iv = this.interventions.find((x) => x.id === id);
+		if (iv) this.ruleDraft = structuredClone(iv.rules);
 	}
 
 	async selectIntervention(id: string): Promise<void> {
 		const iv = this.interventions.find((x) => x.id === id);
 		if (!iv) return;
 		this.interventionId = id;
-		this.ruleDraft = structuredClone(iv.rules);
 		await this.run(async () => {
 			this.effectiveBias = await ResearchService.effectiveBias(id);
 		});
@@ -450,7 +667,7 @@ class ResearchStore {
 	openRun(id: string): RunView {
 		let v = this.views.get(id);
 		if (!v) {
-			v = new RunView(id);
+			v = new RunView(id, () => void this.syncRuns());
 			this.views.set(id, v);
 			void v.open();
 		}
@@ -461,6 +678,18 @@ class ResearchStore {
 		this.views.get(id)?.stop();
 		this.views.delete(id);
 	}
+}
+
+/** Dedupe; drop empty, phrase and trailing-whitespace variants; cap at 4. */
+export function cleanPieces(pieces: unknown[]): string[] {
+	const out: string[] = [];
+	for (const p of pieces) {
+		if (typeof p !== 'string' || p.trim().length === 0) continue;
+		if (/\s$/.test(p)) continue;
+		if (/\S\s+\S/.test(p)) continue; // phrases are not single pieces
+		if (!out.includes(p)) out.push(p);
+	}
+	return out.slice(0, 4);
 }
 
 export const researchStore = new ResearchStore();

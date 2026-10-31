@@ -16,20 +16,49 @@ export function groupColor(index: number): string {
 	return GROUP_COLORS[index % GROUP_COLORS.length];
 }
 
-/** Make spaces, tabs, newlines and other control chars visible. */
-export function visiblePiece(piece: string): string {
-	let out = '';
+/** Whitespace glyphs (muted in ResearchPiece); ASCII source via escapes. */
+export const WS_GLYPH: Record<string, string> = {
+	' ': '\u00b7',
+	'\n': '\u21b5',
+	'\t': '\u21e5',
+	'\r': '\r'
+};
+
+export const WS_TITLE: Record<string, string> = {
+	' ': 'space',
+	'\n': 'newline',
+	'\t': 'tab',
+	'\r': 'carriage return'
+};
+
+export interface PieceSegment {
+	text: string;
+	ws: boolean;
+	title?: string;
+}
+
+/** Split a piece into text and visible whitespace/control segments. */
+export function pieceSegments(piece: string): PieceSegment[] {
+	const out: PieceSegment[] = [];
 	for (const ch of piece) {
 		const c = ch.codePointAt(0) ?? 0;
-		if (ch === ' ') out += '␣';
-		else if (ch === '\n') out += '↵';
-		else if (ch === '\t') out += '⇥';
-		else if (ch === '\r') out += '\\r';
-		else if (c < 0x20 || c === 0x7f) out += `\\x${c.toString(16).padStart(2, '0')}`;
-		else if (ch === '�') out += '�';
-		else out += ch;
+		let seg: PieceSegment;
+		if (WS_GLYPH[ch]) seg = { text: WS_GLYPH[ch], ws: true, title: WS_TITLE[ch] };
+		else if (c < 0x20 || c === 0x7f)
+			seg = { text: `\\x${c.toString(16).padStart(2, '0')}`, ws: true, title: 'control byte' };
+		else seg = { text: ch, ws: false };
+		const last = out[out.length - 1];
+		if (last && !last.ws && !seg.ws) last.text += seg.text;
+		else out.push(seg);
 	}
 	return out;
+}
+
+/** Plain-string version of pieceSegments (titles, option labels). */
+export function visiblePiece(piece: string): string {
+	return pieceSegments(piece)
+		.map((s) => s.text)
+		.join('');
 }
 
 /** True when the base64 bytes are not valid UTF-8 (partial byte tokens). */
@@ -60,6 +89,19 @@ export function fmt(v: number | null | undefined, digits = 3): string {
 	if (v === Infinity) return '+inf';
 	return v.toFixed(digits);
 }
+
+/** Mass with adaptive precision: percent, or scientific below 0.001. */
+export function fmtMass(p: number | null | undefined): string {
+	if (p === null || p === undefined || !Number.isFinite(p)) return '-';
+	if (p === 0) return '0';
+	if (p < 0.001) return p.toExponential(1);
+	const pct = p * 100;
+	return `${pct.toFixed(pct >= 10 ? 1 : 2)}%`;
+}
+
+/** Native select styling that survives @tailwindcss/forms padding. */
+export const SELECT_CLASS =
+	'h-8 rounded-md border border-input bg-transparent py-0 pr-8 pl-2 text-sm leading-normal dark:bg-input/30';
 
 /** p' = p e^d / (1 - p + p e^d): mass of a set after adding d to all its logits. */
 export function shiftedMass(p: number, d: number): number {
@@ -127,4 +169,63 @@ export function buildSeries(
 		out.push({ key: `${labelPrefix}${g.id}:adj`, label: `${labelPrefix}${g.name} post_intervention`, color, dashed: true, points: adj });
 	});
 	return out;
+}
+
+/** File name of a model path (full path stays in tooltips). */
+export function baseName(path: string | undefined): string {
+	if (!path) return '-';
+	const parts = path.split(/[\/]/);
+	return parts[parts.length - 1] || path;
+}
+
+/** Signed delta label, e.g. "-4" or "+2". */
+export function signed(d: number): string {
+	return d > 0 ? `+${d}` : String(d);
+}
+
+/** Human summary of an intervention's rules, e.g. "NEGATIVE -4". */
+export function ruleSummary(
+	rules: { target_group_id: string; operation: string; delta: number; enabled: boolean }[],
+	nameOf: (groupId: string) => string
+): string {
+	const on = rules.filter((r) => r.enabled);
+	if (on.length === 0) return 'no active rules';
+	return on
+		.map((r) => `${nameOf(r.target_group_id)} ${r.operation === 'exclude' ? 'EXCLUDE' : signed(r.delta)}`)
+		.join(', ');
+}
+
+/** ln(p / (1 - p)); null outside (0, 1). */
+export function logOdds(p: number | null | undefined): number | null {
+	if (p === null || p === undefined || !(p > 0 && p < 1)) return null;
+	return Math.log(p / (1 - p));
+}
+
+/** Drop end-of-generation / special markers such as <|im_end|> or </s> for display. */
+export function stripEog(text: string | null | undefined): string {
+	return (text ?? '')
+		.replace(/<\|[^|<>]{1,40}\|>/g, '')
+		.replace(/<\/s>|<eos>|<end_of_turn>/g, '')
+		.trim();
+}
+
+/** Top group (by post_intervention lse) and its mass at one observation. */
+export function topGroup(
+	o: Observation | undefined,
+	stage: 'raw' | 'adj' = 'adj'
+): { id: string; mass: number | null; kind: 'abs' | 'rel' } | null {
+	if (!o) return null;
+	const kind: 'abs' | 'rel' = o.groups.some((g) => g[`${stage}_abs`] !== null) ? 'abs' : 'rel';
+	let best: GroupMetric | null = null;
+	for (const g of o.groups) {
+		const v = g[`${stage}_lse`];
+		if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+		if (!best || v > (best[`${stage}_lse`] as number)) best = g;
+	}
+	return best ? { id: best.id, mass: best[`${stage}_${kind}`], kind } : null;
+}
+
+/** Earliest time stamp of a run (for batch ordering). */
+export function runTime(r: { created_at?: string; started_at?: string }): string {
+	return r.created_at ?? r.started_at ?? '';
 }

@@ -93,7 +93,6 @@
 		{/each}
 	</div>
 	<p class="text-[10px] text-muted-foreground">
-		Markers are captured observations (solid = raw, dashed/square = post_intervention). Connecting
-		segments are visual guides only; positions between markers were not sampled.
+		Markers are captured positions (dot = raw, square = post_intervention); lines are visual guides only.
 	</p>
 </figure>

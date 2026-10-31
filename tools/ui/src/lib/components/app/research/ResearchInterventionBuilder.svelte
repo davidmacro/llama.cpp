@@ -3,13 +3,23 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import { researchStore as rs } from '$lib/stores/research.svelte';
-	import { fmt, shiftedMass } from '$lib/utils/research';
+	import { fmt, ruleSummary, SELECT_CLASS, shiftedMass } from '$lib/utils/research';
 	import ResearchPiece from './ResearchPiece.svelte';
 
-	const SELECT = 'h-8 rounded-md border border-input bg-transparent px-2 text-sm dark:bg-input/30';
+	const SELECT = SELECT_CLASS;
+	const nameOf = (id: string) => rs.groupName(id);
 
 	let groups = $derived(rs.draft.groups);
-	let ivForDesign = $derived(rs.interventions.filter((i) => i.design_id === rs.designId));
+	let showHidden = $state(false);
+	let ivAll = $derived(rs.interventions.filter((i) => i.design_id === rs.designId));
+	let ivForDesign = $derived(showHidden ? ivAll : ivAll.filter((i) => !rs.hiddenIvs.has(i.id)));
+	let nHidden = $derived(ivAll.filter((i) => rs.hiddenIvs.has(i.id)).length);
+	// rule id -> "GROUP -3" for the effective bias table
+	let ruleLabel = $derived.by(() => {
+		const iv = rs.interventions.find((i) => i.id === rs.interventionId);
+		const rules = iv?.rules ?? rs.ruleDraft;
+		return new Map(rules.map((r) => [r.id, ruleSummary([{ ...r, enabled: true }], nameOf)]));
+	});
 
 	// synthetic formula preview (pure client math)
 	let pDemo = $state(0.6);
@@ -17,7 +27,8 @@
 	let pShifted = $derived(shiftedMass(Math.min(Math.max(pDemo, 0), 1), dDemo));
 
 	function addRule() {
-		const n = rs.ruleDraft.length + 1;
+		let n = rs.ruleDraft.length + 1;
+		while (rs.ruleDraft.some((r) => r.id === `r${n}`)) n++;
 		rs.ruleDraft.push({
 			id: `r${n}`,
 			target_group_id: groups[0]?.id ?? '',
@@ -30,12 +41,12 @@
 
 <div class="grid gap-6 xl:grid-cols-2">
 	<section class="space-y-3">
-		<h2 class="text-lg font-semibold">Intervention rules</h2>
+		<h2 class="text-lg font-semibold">New intervention <span class="text-xs font-normal text-muted-foreground">(saving starts a fresh draft)</span></h2>
 		{#if !rs.designId}
 			<p class="text-sm text-amber-600">Save (and ideally approve) a design revision first; interventions reference a design.</p>
 		{:else}
 			<p class="text-xs text-muted-foreground">
-				For design {rs.designId}. Each rule adds <i>delta</i> to the logits of every member of a group
+				Each rule adds <i>delta</i> to the logits of every member of a group
 				(applied through the sampler logit_bias stage); exclude sets them to -inf and wins.
 			</p>
 		{/if}
@@ -65,6 +76,8 @@
 						<td class="pr-2"><input type="checkbox" bind:checked={r.enabled} /></td>
 						<td><Button size="sm" variant="ghost" onclick={() => rs.ruleDraft.splice(i, 1)}>x</Button></td>
 					</tr>
+				{:else}
+					<tr><td colspan="6" class="py-1 text-xs text-muted-foreground">Empty draft: add a rule, or duplicate a saved intervention below.</td></tr>
 				{/each}
 			</tbody>
 		</table>
@@ -77,11 +90,28 @@
 		</div>
 
 		<div class="space-y-1">
-			<h3 class="text-sm font-medium">Saved interventions for this design</h3>
+			<div class="flex items-center gap-2">
+				<h3 class="text-sm font-medium">Saved interventions for this design</h3>
+				{#if nHidden}
+					<label class="ml-auto flex items-center gap-1 text-xs text-muted-foreground">
+						<input type="checkbox" bind:checked={showHidden} /> show hidden ({nHidden})
+					</label>
+				{/if}
+			</div>
 			{#each ivForDesign as iv (iv.id)}
-				<Button size="sm" variant={rs.interventionId === iv.id ? 'secondary' : 'ghost'} onclick={() => rs.selectIntervention(iv.id)}>
-					{iv.id} <Badge variant="outline">{iv.state ?? 'draft'}</Badge> ({iv.rules.length} rules)
-				</Button>
+				{@const hidden = rs.hiddenIvs.has(iv.id)}
+				<div class={['flex items-center gap-1 rounded', rs.interventionId === iv.id && 'bg-accent', hidden && 'opacity-50']}>
+					<Button size="sm" variant="ghost" class="min-w-0 flex-1 justify-start" title="Show effective bias" onclick={() => rs.selectIntervention(iv.id)}>
+						<span class="truncate">{ruleSummary(iv.rules, nameOf)}</span> <Badge variant="outline">{iv.state ?? 'draft'}</Badge>
+						<span class="text-[10px] text-muted-foreground">{iv.id}</span>
+					</Button>
+					<Button size="sm" variant="ghost" class="h-7 px-2 text-xs" title="Copy these rules into the editor as a new draft" onclick={() => rs.duplicateIntervention(iv.id)}
+						>duplicate</Button
+					>
+					<Button size="sm" variant="ghost" class="h-7 px-2 text-xs" title="Hide in this browser only (not deleted)" onclick={() => rs.toggleHidden(iv.id)}
+						>{hidden ? 'unhide' : 'hide'}</Button
+					>
+				</div>
 			{:else}
 				<p class="text-xs text-muted-foreground">none</p>
 			{/each}
@@ -103,7 +133,13 @@
 	</section>
 
 	<section class="space-y-3">
-		<h2 class="text-lg font-semibold">Effective bias</h2>
+		<h2 class="text-lg font-semibold">
+			Effective bias
+			{#if rs.interventionId && rs.effectiveBias}
+				{@const sel = rs.interventions.find((i) => i.id === rs.interventionId)}
+				<span class="text-sm font-normal text-muted-foreground">&middot; {sel ? ruleSummary(sel.rules, nameOf) : rs.interventionId}</span>
+			{/if}
+		</h2>
 		{#if !rs.effectiveBias}
 			<p class="text-sm text-muted-foreground">Save or select an intervention to see the per-token bias map.</p>
 		{:else}
@@ -123,7 +159,7 @@
 							<td class="pr-2"><ResearchPiece piece={e.piece} /></td>
 							<td class="pr-2 font-mono">{e.excluded ? 'exclude (-inf)' : fmt(e.delta, 2)}</td>
 							<td>
-								{e.rules.join(', ')}
+								{e.rules.map((r) => ruleLabel.get(r) ?? r).join(', ')}
 								{#if e.rules.length > 1}<span class="text-amber-600">overlap: additive</span>{/if}
 							</td>
 						</tr>
