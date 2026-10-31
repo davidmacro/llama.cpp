@@ -7,6 +7,10 @@
 #include "server-tools.h"
 #include "systemone.h"
 
+#ifdef LLAMA_SERVER_RESEARCH
+#include "research/research-api.h"
+#endif
+
 #include "arg.h"
 #include "build-info.h"
 #include "common.h"
@@ -667,6 +671,11 @@ static int server_run_instance(common_params & params, server_role & role, commo
     server_routes  routes(params, ctx_server);
     server_tools   tools;
 
+#ifdef LLAMA_SERVER_RESEARCH
+    // declared before ctx_http: destroyed after the HTTP server, before ctx_server
+    research_api research(params, ctx_server);
+#endif
+
     server_http_context ctx_http;
     if (!ctx_http.init(params)) {
         SRV_ERR("%s", "failed to initialize HTTP server\n");
@@ -674,6 +683,17 @@ static int server_run_instance(common_params & params, server_role & role, commo
     }
 
     server_register_routes(ctx_http, routes);
+#ifdef LLAMA_SERVER_RESEARCH
+    for (auto & r : research.routes()) {
+        if (r.method == "GET") {
+            ctx_http.get(r.path, r.handler);
+        } else if (r.method == "PATCH") {
+            ctx_http.patch(r.path, r.handler);
+        } else {
+            ctx_http.post(r.path, r.handler);
+        }
+    }
+#endif
     server_register_stream_routes(ctx_http,
         server_stream_make_get_handler(),
         server_stream_make_lookup_handler(),
@@ -716,12 +736,23 @@ static int server_run_instance(common_params & params, server_role & role, commo
     }
 
     routes.update_meta(ctx_server);
+#ifdef LLAMA_SERVER_RESEARCH
+    if (!research.init()) {
+        clean_up();
+        ctx_http.join();
+        SRV_ERR("%s", "exiting due to research module error\n");
+        return 1;
+    }
+#endif
     ctx_http.is_ready.store(true);
 
     SRV_INF("%s", "model loaded\n");
 
     shutdown_handler = [&](int) {
         mcp_mgr.shutdown();
+#ifdef LLAMA_SERVER_RESEARCH
+        research.stop();
+#endif
         // this will unblock start_loop()
         ctx_server.terminate();
     };

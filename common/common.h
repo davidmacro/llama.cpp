@@ -530,6 +530,7 @@ struct common_params {
     std::string input_suffix         = ""; // string to suffix user inputs with                             // NOLINT
     std::string logits_file          = ""; // file for saving *all* logits                                  // NOLINT
     std::string path_prompts_log_dir = ""; // directory with logged prompts                                 // NOLINT
+    std::string research_db          = ""; // research module SQLite DB, empty = disabled (needs LLAMA_SERVER_RESEARCH) // NOLINT
 
     // llama-debug specific options
     std::string logits_output_dir = "data"; // directory for saving logits output files                     // NOLINT
@@ -662,7 +663,7 @@ struct common_params {
 
     // server CORS params
     std::string cors_origins = "*";
-    std::string cors_methods = "GET, POST, DELETE, OPTIONS";
+    std::string cors_methods = "GET, POST, PATCH, DELETE, OPTIONS";
     std::string cors_headers = "*";
     bool cors_credentials = true;
     bool cors_origins_explicit = false; // for --agent option

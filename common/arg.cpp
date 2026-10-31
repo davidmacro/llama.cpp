@@ -3941,6 +3941,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_LOG_JSONL"));
     add_opt(common_arg(
+        {"--research-db"}, "PATH",
+        "research module: SQLite database path, enables /api/research/v1 (needs a build with LLAMA_SERVER_RESEARCH, default: disabled)",
+        [](common_params & params, const std::string & value) {
+            params.research_db = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_RESEARCH_DB"));
+    add_opt(common_arg(
         {"--log-prompts-dir"}, "PATH",
         "Log prompts to directory (auto-created if not present; only used for debugging, default: disabled)",
         [](common_params & params, const std::string & value) {

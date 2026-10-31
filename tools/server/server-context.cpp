@@ -25,6 +25,10 @@
 #include "decision-engine.h"
 #include "systemone.h"
 
+#ifdef LLAMA_SERVER_RESEARCH
+#include "research/research-capture.h"
+#endif
+
 #include <algorithm>
 #include <cstddef>
 #include <cinttypes>
@@ -564,6 +568,12 @@ struct server_slot {
     }
 
     bool can_speculate() const {
+#ifdef LLAMA_SERVER_RESEARCH
+        // research runs observe the plain sampling path only
+        if (task && task->params.research) {
+            return false;
+        }
+#endif
         return !!spec;
     }
 
@@ -5141,6 +5151,15 @@ private:
             // shifted according to the current sub-batch
             const int tok_idx = slot.i_batch - off;
 
+#ifdef LLAMA_SERVER_RESEARCH
+            // read-only capture of the raw logits row before the sampler chain runs
+            research_run * rrun = slot.task->params.research.get();
+            const int32_t rpos = slot.prompt.n_tokens();
+            if (rrun) {
+                rrun->before_sample(llama_get_logits_ith(slot.ctx_tgt, tok_idx), llama_vocab_n_tokens(vocab), rpos);
+            }
+#endif
+
             llama_token id;
             {
                 scoped_timer timer(t_sampl, n_sampl);
@@ -5150,6 +5169,12 @@ private:
             slot.i_batch = -1;
 
             common_sampler_accept(slot.smpl.get(), id, true);
+
+#ifdef LLAMA_SERVER_RESEARCH
+            if (rrun) {
+                rrun->on_token(id, rpos);
+            }
+#endif
 
             // here we have synchronized the llama_context (due to the sampling above), so we can do time measurement
             const int64_t t_now = ggml_time_us();
@@ -5487,6 +5512,56 @@ llama_context * server_context::get_llama_context() const {
 server_response_reader server_context::get_response_reader() {
     return impl->get_response_reader();
 }
+
+#ifdef LLAMA_SERVER_RESEARCH
+std::string server_context::research_render_chat(const std::string & user_text) {
+    std::vector<raw_buffer> files;
+    common_chat_session session;
+    json body = {
+        {"messages", json::array({json {{"role", "user"}, {"content", user_text}}})},
+    };
+    json data = oaicompat_chat_params_parse(impl->vocab, body, impl->chat_params, files, session);
+    return data.at("prompt").get<std::string>();
+}
+
+std::string server_context::research_complete(
+        const json & data,
+        const std::vector<llama_logit_bias> & bias,
+        const std::shared_ptr<research_run> & run,
+        const std::function<bool()> & should_stop) {
+    auto rd = impl->get_response_reader();
+    {
+        server_task task(SERVER_TASK_TYPE_COMPLETION);
+        task.id = rd.get_new_id();
+        auto inputs = tokenize_input_prompts(impl->vocab, impl->mctx, data.at("prompt"), true, true, impl->init_opt);
+        if (inputs.size() != 1) {
+            return "research runs need exactly one prompt";
+        }
+        task.tokens = std::move(inputs[0]);
+        task.params = server_schema::eval_llama_cmpl_schema(impl->vocab, impl->params_base, impl->params_base.sampling.logit_bias_eog, data);
+        if (!task.params.sampling.grammar.empty()) {
+            return "grammar/json_schema are not allowed in research runs";
+        }
+        task.params.n_cmpl       = 1;
+        task.params.stream       = false;
+        task.params.cache_prompt = false;
+        task.params.sampling.backend_sampling = false;
+        for (const auto & b : bias) {
+            task.params.sampling.logit_bias.push_back(b);
+        }
+        task.params.research = run;
+        rd.post_task(std::move(task));
+    }
+    auto all = rd.wait_for_all(should_stop);
+    if (all.is_terminated) {
+        return "cancelled";
+    }
+    if (all.error) {
+        return safe_json_to_str(all.error->to_json());
+    }
+    return "";
+}
+#endif
 
 server_context_meta server_context::get_meta() const {
     auto bos_id = llama_vocab_bos(impl->vocab);

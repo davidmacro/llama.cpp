@@ -75,7 +75,15 @@ struct server_control_response {
     int32_t                        n_predict = -1; // text tokens and audio frames, -1: until the context is full
 };
 
+#ifdef LLAMA_SERVER_RESEARCH
+struct research_run;
+#endif
+
 struct task_params {
+#ifdef LLAMA_SERVER_RESEARCH
+    std::shared_ptr<research_run> research; // set for research runs, see research/research-capture.h
+#endif
+
     bool stream          = false;
     bool include_usage   = false;
     bool cache_prompt    = true; // remember the prompt to avoid reprocessing all prompt

@@ -91,6 +91,20 @@ struct server_context {
 
     // note: must be set before load_model() is called
     void set_state_callback(server_state_callback_t callback);
+
+#ifdef LLAMA_SERVER_RESEARCH
+    // research module helpers, callable from any thread
+    // apply the chat template to a single user message
+    std::string research_render_chat(const std::string & user_text);
+
+    // run one non-streaming completion bound to a research run and wait for it
+    // returns "" on success, "cancelled" when should_stop fired, else an error message
+    std::string research_complete(
+            const json & data,
+            const std::vector<llama_logit_bias> & bias,
+            const std::shared_ptr<research_run> & run,
+            const std::function<bool()> & should_stop);
+#endif
 };
 
 

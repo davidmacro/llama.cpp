@@ -5,8 +5,8 @@ import {
 	SHORTCUT_SEARCH,
 	SHORTCUT_SETTINGS
 } from './keyboard-shortcuts.constants';
-import { MODELS_ROUTE_ID } from './routes.constants';
-import { Search, Settings, SquarePen } from '@lucide/svelte';
+import { MODELS_ROUTE_ID, RESEARCH_ROUTE_ID, ROUTES } from './routes.constants';
+import { FlaskConical, Search, Settings, SquarePen } from '@lucide/svelte';
 import McpLogo from '$lib/components/app/mcp/McpLogo.svelte';
 import { SidebarAction, ToolSource } from '$lib/enums';
 import type { DesktopIconStripItem } from '$lib/types';
@@ -108,6 +108,12 @@ export const SIDEBAR_ACTIONS_ITEMS: DesktopIconStripItem[] = [
 		icon: MODEL_ICON,
 		keys: SHORTCUT_MODELS,
 		tooltip: 'Models'
+	},
+	{
+		activeRouteId: RESEARCH_ROUTE_ID,
+		icon: FlaskConical,
+		route: ROUTES.RESEARCH,
+		tooltip: 'Research'
 	},
 	{
 		action: SidebarAction.MCP,
