@@ -21,7 +21,7 @@ export const WS_GLYPH: Record<string, string> = {
 	' ': '\u00b7',
 	'\n': '\u21b5',
 	'\t': '\u21e5',
-	'\r': '\r'
+	'\r': '\u240d'
 };
 
 export const WS_TITLE: Record<string, string> = {
@@ -228,4 +228,20 @@ export function topGroup(
 /** Earliest time stamp of a run (for batch ordering). */
 export function runTime(r: { created_at?: string; started_at?: string }): string {
 	return r.created_at ?? r.started_at ?? '';
+}
+
+/** A member whose visible text is at most 2 characters matches the start of many words (e.g. " m"). */
+export function isGenericPiece(piece: string | undefined | null): boolean {
+	return typeof piece === 'string' && piece.trim().length <= 2;
+}
+
+/** Absolute mass outside every watched group (1 - sum); null without full log Z. */
+export function unwatchedMass(o: Observation | undefined, stage: 'raw' | 'adj'): number | null {
+	if (!o || !o.groups.some((g) => g[`${stage}_abs`] !== null)) return null;
+	let sum = 0;
+	for (const g of o.groups) {
+		const v = g[`${stage}_abs`];
+		if (typeof v === 'number' && Number.isFinite(v)) sum += v;
+	}
+	return Math.max(0, 1 - sum);
 }

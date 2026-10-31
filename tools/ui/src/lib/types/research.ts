@@ -283,8 +283,19 @@ export type MetricKey = 'lse' | 'rel' | 'abs';
 
 /** Compact per-run result used by the batch matrix (first captured position). */
 export interface RunDigest {
+	/** post_intervention top group */
 	groupName: string | null;
 	groupId: string | null;
 	mass: number | null;
 	massKind: 'abs' | 'rel';
+	/** raw (pre-intervention) top group */
+	rawGroupName: string | null;
+	rawGroupId: string | null;
+	rawMass: number | null;
+	/** post_intervention mass in no watched group (null without log Z) */
+	unwatched: number | null;
+	/** selected token at the first captured position is in no group */
+	outside: boolean;
+	/** a position was captured */
+	captured: boolean;
 }

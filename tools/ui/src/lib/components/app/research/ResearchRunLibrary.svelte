@@ -3,6 +3,7 @@
 	import { Button } from '$lib/components/ui/button';
 	import { researchStore as rs } from '$lib/stores/research.svelte';
 	import { stripEog } from '$lib/utils/research';
+	import { untrack } from 'svelte';
 	import ResearchBatchMatrix from './ResearchBatchMatrix.svelte';
 	import ResearchRunInspector from './ResearchRunInspector.svelte';
 
@@ -15,7 +16,20 @@
 	function select(id: string) {
 		rs.openRun(id);
 		rs.selectedRunId = id;
+		// keep the matrix on the batch of the opened run
+		const b = rs.runs.find((r) => r.id === id)?.batch_id;
+		if (b && b !== rs.batch?.id) rs.batchPick = b;
 	}
+
+	// open the first cell (first arm, first seed) when nothing from the shown batch is open
+	$effect(() => {
+		const b = rs.batch;
+		const sel = rs.selectedRunId;
+		if (!b || (sel && b.runs.some((r) => r.id === sel))) return;
+		const first =
+			b.runs.find((r) => r.arm === b.arms[0] && r.seed === b.seeds[0]) ?? b.runs[0];
+		if (first) untrack(() => select(first.id));
+	});
 
 	function reload(id: string) {
 		rs.closeRun(id);

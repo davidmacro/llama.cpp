@@ -41,7 +41,14 @@
 
 <div class="grid gap-6 xl:grid-cols-2">
 	<section class="space-y-3">
-		<h2 class="text-lg font-semibold">New intervention <span class="text-xs font-normal text-muted-foreground">(saving starts a fresh draft)</span></h2>
+		<h2 class="text-lg font-semibold">
+			New intervention
+			{#if rs.design}
+				<span class="text-sm font-normal text-muted-foreground"
+					>for design <span class="font-medium text-foreground">r{rs.design.revision ?? '?'}</span> ({rs.design.state})</span
+				>
+			{/if}
+		</h2>
 		{#if !rs.designId}
 			<p class="text-sm text-amber-600">Save (and ideally approve) a design revision first; interventions reference a design.</p>
 		{:else}
@@ -91,7 +98,7 @@
 
 		<div class="space-y-1">
 			<div class="flex items-center gap-2">
-				<h3 class="text-sm font-medium">Saved interventions for this design</h3>
+				<h3 class="text-sm font-medium">Saved interventions for design r{rs.design?.revision ?? '?'}</h3>
 				{#if nHidden}
 					<label class="ml-auto flex items-center gap-1 text-xs text-muted-foreground">
 						<input type="checkbox" bind:checked={showHidden} /> show hidden ({nHidden})

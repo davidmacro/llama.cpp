@@ -20,7 +20,7 @@ import type {
 	RunToken,
 	TokenInfo
 } from '$lib/types/research';
-import { groupColor, runTime, slugId, topGroup } from '$lib/utils/research';
+import { groupColor, runTime, slugId, topGroup, unwatchedMass } from '$lib/utils/research';
 import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 
 export type ResearchTab = 'question' | 'design' | 'interventions' | 'launch' | 'runs' | 'compare';
@@ -355,14 +355,33 @@ class ResearchStore {
 		for (const r of runs) {
 			if (ACTIVE.has(r.status) || this.digests.has(r.id) || this.#digestPending.has(r.id)) continue;
 			this.#digestPending.add(r.id);
-			ResearchService.runObservations(r.id)
-				.then((o) => {
-					const top = topGroup(o.observations[0]);
+			Promise.all([
+				ResearchService.runObservations(r.id),
+				ResearchService.getRun(r.id).catch(() => null)
+			])
+				.then(([o, m]) => {
+					const first = o.observations[0];
+					const top = topGroup(first);
+					const rawTop = topGroup(first, 'raw');
+					const name = (id: string | undefined) =>
+						id === undefined ? null : (o.groups.find((g) => g.id === id)?.name ?? id);
+					const members = new Set<number>();
+					for (const g of m?.compiled?.groups ?? []) for (const id of g.members) members.add(id);
 					this.digests.set(r.id, {
 						groupId: top?.id ?? null,
-						groupName: top ? (o.groups.find((g) => g.id === top.id)?.name ?? top.id) : null,
+						groupName: name(top?.id),
 						mass: top?.mass ?? null,
-						massKind: top?.kind ?? 'rel'
+						massKind: top?.kind ?? 'rel',
+						rawGroupId: rawTop?.id ?? null,
+						rawGroupName: name(rawTop?.id),
+						rawMass: rawTop?.mass ?? null,
+						unwatched: unwatchedMass(first, 'adj'),
+						outside:
+							!!first &&
+							first.selected_token_id !== undefined &&
+							members.size > 0 &&
+							!members.has(first.selected_token_id),
+						captured: !!first
 					});
 				})
 				.catch(() => null)

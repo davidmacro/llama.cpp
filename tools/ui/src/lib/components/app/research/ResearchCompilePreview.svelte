@@ -2,7 +2,7 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import type { CompiledPlan, DesignGroup } from '$lib/types/research';
-	import { visiblePiece } from '$lib/utils/research';
+	import { isGenericPiece, visiblePiece } from '$lib/utils/research';
 	import ResearchPiece from './ResearchPiece.svelte';
 
 	interface Props {
@@ -20,8 +20,8 @@
 	const colorOf = (id: string) => byId.get(id)?.color ?? '#888';
 	const isApprox = (gid: string, tid: number) => byId.get(gid)?.approx_ids?.includes(tid) ?? false;
 
-	/** A first token whose visible text is 1-2 chars is a generic prefix (e.g. " m"). */
-	const isGeneric = (piece: string | undefined) => piece !== undefined && piece.trim().length <= 2;
+	// a resolved member (not a multi-token split) whose visible text is 1-2 chars
+	const genericMember = (status: string, piece: string | undefined) => status !== 'multi_token' && isGenericPiece(piece);
 
 	function statusClass(s: string): string {
 		if (s === 'accepted_single_token') return 'text-green-600';
@@ -66,15 +66,17 @@
 					<td class="py-0.5">
 						<div class="flex flex-wrap items-center gap-1">
 							{#each c.token_ids as id, j (j)}
-								<span class={['rounded border px-1', overlapIds.has(id) && 'border-amber-500']}>
+								{@const generic = genericMember(c.status, c.pieces[j])}
+								<span class={['rounded border px-1', (overlapIds.has(id) || generic) && 'border-amber-500']}>
 									{id}
 									{#if c.pieces[j] !== undefined}<ResearchPiece piece={c.pieces[j]} />{/if}
+									{#if generic}<span class="text-amber-600" title="'{visiblePiece(c.pieces[j] ?? '')}' is so short that many unrelated words start with it">generic prefix</span>{/if}
 									{#if isApprox(c.group_id, id)}<span class="text-amber-600">approx.</span>{/if}
 								</span>
 							{/each}
 							{#if c.status === 'multi_token' && c.token_ids.length && onUseFirst}
 								{@const first = c.token_ids[0]}
-								{#if isGeneric(c.pieces[0])}
+								{#if isGenericPiece(c.pieces[0])}
 									<span class="text-amber-600" title="First piece '{visiblePiece(c.pieces[0] ?? '')}' is so short that many unrelated words start with it"
 										>generic prefix</span
 									>

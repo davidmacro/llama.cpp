@@ -33,6 +33,11 @@
 	}
 </script>
 
+{#snippet top(id: string | null, name: string | null, mass: number | null, kind: 'abs' | 'rel')}
+	<span class="font-medium" style:color={id ? colorByName.get(id) : undefined}>{name ?? '-'}</span>
+	{fmtMass(mass)}{kind === 'rel' ? ' rel' : ''}
+{/snippet}
+
 {#if batch}
 	<section class="space-y-2">
 		<div class="flex flex-wrap items-center gap-2 text-sm">
@@ -44,7 +49,7 @@
 					{#each rs.batches as b (b.id)}<option value={b.id}>{batchLabel(b)}</option>{/each}
 				</select>
 			{/if}
-			<span class="text-xs text-muted-foreground">answer &middot; top watched group (post_intervention) at the first captured position</span>
+			<span class="text-xs text-muted-foreground">answer &middot; top group raw -&gt; post_intervention at the first captured position</span>
 		</div>
 		<div class="overflow-x-auto">
 			<table class="w-full table-fixed border-collapse text-sm">
@@ -75,11 +80,25 @@
 											<div class="truncate font-mono">
 												{#if r.status === 'completed'}{stripEog(r.text) || '(empty)'}{:else}<span class="text-muted-foreground">{r.status}</span>{/if}
 											</div>
-											<div class="truncate text-xs text-muted-foreground">
-												{#if dg?.groupName}
-													<span class="font-medium" style:color={dg.groupId ? colorByName.get(dg.groupId) : undefined}>{dg.groupName}</span>
-													{fmtMass(dg.mass)}{dg.massKind === 'rel' ? ' rel' : ''}
-												{:else if dg}no captured position{:else}&nbsp;{/if}
+											<div class="flex items-center gap-1 text-xs text-muted-foreground">
+												<span class="min-w-0 truncate">
+													{#if dg?.groupName || dg?.rawGroupName}
+														{#if r.intervention_id && dg.rawGroupName}
+															{@render top(dg.rawGroupId, dg.rawGroupName, dg.rawMass, dg.massKind)}
+															<span class="px-0.5">-&gt;</span>
+														{/if}
+														{@render top(dg.groupId, dg.groupName, dg.mass, dg.massKind)}
+													{:else if dg}no captured position{:else}&nbsp;{/if}
+												</span>
+												{#if dg?.outside}
+													<span class="shrink-0 rounded border border-dashed border-amber-500/60 px-1 text-[10px] text-amber-600" title="The selected token at the first captured position is in no group">no group</span>
+												{/if}
+												{#if dg?.unwatched !== null && dg?.unwatched !== undefined && dg.unwatched > 0.5}
+													<span
+														class="ml-auto shrink-0 rounded bg-amber-500/15 px-1 text-[10px] text-amber-600"
+														title="post_intervention mass outside every watched group">unwatched {fmtMass(dg.unwatched)}</span
+													>
+												{/if}
 											</div>
 										</button>
 									{:else}

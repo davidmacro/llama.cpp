@@ -5,7 +5,7 @@
 	import { cleanSpec, ResearchService } from '$lib/services/research.service';
 	import { errMsg, researchStore as rs } from '$lib/stores/research.svelte';
 	import type { DesignGroup, DesignSpec, TokenInfo } from '$lib/types/research';
-	import { SELECT_CLASS } from '$lib/utils/research';
+	import { isGenericPiece, SELECT_CLASS } from '$lib/utils/research';
 	import ResearchCompilePreview from './ResearchCompilePreview.svelte';
 	import ResearchPiece from './ResearchPiece.svelte';
 
@@ -169,8 +169,9 @@
 							{#if s.kind === 'variant_list'}
 								{#each s.texts as t, ti (ti)}
 									{#if t.length}
-										<span class="inline-flex items-center rounded border pl-0.5">
+										<span class={['inline-flex items-center gap-1 rounded border pl-0.5', isGenericPiece(t) && 'border-amber-500/60']}>
 											<ResearchPiece piece={t} />
+											{#if isGenericPiece(t)}<span class="text-[10px] text-amber-600" title="So short that many unrelated words start with it">generic prefix</span>{/if}
 											<button class="px-1 text-xs text-muted-foreground hover:text-foreground" title="remove" onclick={() => removeVariant(g, si, ti)}>x</button>
 										</span>
 									{/if}
@@ -178,19 +179,22 @@
 							{:else if s.kind === 'exact_token_piece'}
 								<span class="inline-flex items-center rounded border pl-1 text-[10px] text-muted-foreground">
 									exact <ResearchPiece piece={s.text} class="ml-1" />
+									{#if isGenericPiece(s.text)}<span class="ml-1 text-amber-600" title="So short that many unrelated words start with it">generic prefix</span>{/if}
 									<button class="px-1 text-xs hover:text-foreground" title="remove" onclick={() => g.selectors.splice(si, 1)}>x</button>
 								</span>
 							{:else}
 								{#each s.ids as id (id)}
 									{@const info = rs.tokenCache.get(id)}
 									{@const approx = g.approx_ids?.includes(id)}
+									{@const generic = isGenericPiece(info?.piece)}
 									<span
-										class={['inline-flex items-center gap-1 rounded border pl-1 text-xs', approx && 'border-amber-500/60']}
+										class={['inline-flex items-center gap-1 rounded border pl-1 text-xs', (approx || generic) && 'border-amber-500/60']}
 										title={approx ? 'approximate: first token of a multi-token word' : `token id ${id}`}
 									>
 										<span class="font-mono text-muted-foreground">#{id}</span>
 										{#if info}<ResearchPiece piece={info.piece} b64={info.piece_b64} />{/if}
-										{#if approx}<span class="text-[10px] text-amber-600">approx.{info && info.piece.trim().length <= 2 ? ' generic prefix' : ''}</span>{/if}
+										{#if approx}<span class="text-[10px] text-amber-600">approx.</span>{/if}
+										{#if generic}<span class="text-[10px] text-amber-600" title="So short that many unrelated words start with it">generic prefix</span>{/if}
 										<button class="px-1 text-muted-foreground hover:text-foreground" title="remove" onclick={() => removeTokenId(g, si, id)}>x</button>
 									</span>
 								{/each}
