@@ -247,7 +247,7 @@ bool is_base64(const std::string & s, size_t from) {
 std::string image_ref_error(const std::string & ref, bool allow_media_urls) {
     if (starts_with(ref, "http://") || starts_with(ref, "https://") || starts_with(ref, "file://")) {
         return allow_media_urls ? ""
-            : "image URLs are disabled on this server (--systemone-media-urls); send a data:image/...;base64 URI or raw base64";
+            : "image URLs are disabled on this server (--decision-media-urls); send a data:image/...;base64 URI or raw base64";
     }
     if (starts_with(ref, "data:")) {
         const size_t comma = ref.find(',');
@@ -577,7 +577,7 @@ prompt build(const common_chat_templates * tmpls, bool use_jinja, const common_j
         msg.role    = "user";
         msg.content = user;
         in.messages = { msg };
-        rendered = common_chat_templates_apply(tmpls, in).prompt;
+        rendered = common_chat_templates_apply(tmpls, in).prompt.str();
     }
     const size_t at_s = rendered.find(s_state), at_q = rendered.find(s_question);
     if (at_s == std::string::npos || at_q == std::string::npos || at_q < at_s) {

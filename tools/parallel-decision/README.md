@@ -8,7 +8,8 @@ fields are answered in one `llama_decode` and cannot see each other. Each answer
 the JSON object is assembled by code, so it always matches the schema.
 
 This directory holds the engine (`decision-engine.*`), a CLI (`llama-parallel-decision`), and the engine is also
-served by `llama-server` as `POST /v1/decision` and, in the TypeSafe System One format, as `POST /v1/systemone`.
+served by `llama-server` as `POST /v1/decision/raw` and, in the TypeSafe System One format, as `POST /v1/decision`.
+(`POST /v1/systemone` is upstream llama.cpp's separate System One API for dedicated decision models.)
 
 ## Build
 
@@ -59,13 +60,13 @@ sequence (about 50 MB each for Qwen3.5 4B and 9B), and llama.cpp only batches th
 the same number of tokens. The engine right-pads each group of branches to its longest one, so they still score in a
 single pass; the padding comes after the token that is read, so it doesn't change the result.
 
-## POST /v1/decision
+## POST /v1/decision/raw
 
 `contexts` is a list of 1-256 strings. They share one schema, one set of instructions, and one cached prefix; results
 come back in the same order.
 
 ```bash
-curl http://localhost:8096/v1/decision -H "Content-Type: application/json" -d '{
+curl http://localhost:8096/v1/decision/raw -H "Content-Type: application/json" -d '{
   "model": "gemma-4-12b",
   "instructions": "Answer each question about this support request from its state.",
   "schema": {
@@ -122,10 +123,11 @@ Numeric fields take `aggregate`: `mode` (default), `median` or `mean`.
 | `tree_max` | 128 | per-field switch between tree and greedy |
 | `cache_prompt` | true | reuse the cached instructions + schema prefix |
 
-## POST /v1/systemone
+## POST /v1/decision
 
 The same engine also speaks TypeSafe's [System One](https://api.typesafe.ai/openapi.json) wire format, so the official
-SDKs work against llama-server by changing only the base URL. It needs `--decision-seqs` like `/v1/decision`.
+SDKs work against llama-server with a transport that sends their `/v1/systemone` requests to `/v1/decision` (see the
+top-level README). It needs `--decision-seqs` like `/v1/decision/raw`.
 
 ```bash
 ./build/bin/llama-server -m model.gguf -a jev-latest -ngl 99 -fa on -sm none --decision-seqs 128 --port 8096
@@ -155,7 +157,7 @@ How questions map to the engine; every question is scored in tree mode, so each 
   request can use different modes. On Gemma 4 E4B names were never worse than codes and clearly better when options
   have no description (codes: -4 to -7 points accuracy, answer changes with option order for 22-25% of items vs 0-17%);
   codes only matched names with opaque keys such as ids.
-- `confidence`: `--systemone-confidence entropy` (default, 1 - normalised entropy) or `max` (highest probability).
+- `confidence`: `--decision-confidence entropy` (default, 1 - normalised entropy) or `max` (highest probability).
   Neither is TypeSafe's calibrated confidence.
 - `usage.input_tokens` is the whole rendered prompt, cached or not; `usage.output_tokens` is the number of questions.
 - Invalid requests get 422 `{"detail": [...]}` in FastAPI / pydantic form (types, `loc` and messages checked against

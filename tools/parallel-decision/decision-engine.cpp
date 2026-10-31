@@ -323,6 +323,23 @@ void engine::decode_image(const mtmd_input_chunk * chunk, llama_pos pos0, llama_
     }
 }
 
+// common_batch_clear / common_batch_add were removed from common (llama_batch_ext migration)
+static void batch_clear(llama_batch & batch) {
+    batch.n_tokens = 0;
+}
+
+static void batch_add(llama_batch & batch, llama_token id, llama_pos pos, const std::vector<llama_seq_id> & seq_ids, bool logits) {
+    GGML_ASSERT(batch.seq_id[batch.n_tokens] && "llama_batch size exceeded");
+    batch.token   [batch.n_tokens] = id;
+    batch.pos     [batch.n_tokens] = pos;
+    batch.n_seq_id[batch.n_tokens] = seq_ids.size();
+    for (size_t i = 0; i < seq_ids.size(); ++i) {
+        batch.seq_id[batch.n_tokens][i] = seq_ids[i];
+    }
+    batch.logits  [batch.n_tokens] = logits;
+    batch.n_tokens++;
+}
+
 // Decode several prompts, each on its own sequence, packed into as few batches as n_batch allows.
 // Images are decoded one sequence at a time: text up to each part's next image is batched across
 // parts, then those images are decoded, and so on. A text-only prompt is a single batched pass.
@@ -331,7 +348,7 @@ void engine::decode_parts(const std::vector<prompt_part> & parts) {
     llama_batch batch = llama_batch_init(n_batch, 0, 1);
     auto flush = [&]() {
         const int rc = batch.n_tokens > 0 ? llama_decode(ctx, batch) : 0;
-        common_batch_clear(batch);
+        batch_clear(batch);
         if (rc != 0) {
             throw std::runtime_error(rc == 1 ? "no free KV cache space for the decision prompt"
                                              : "llama_decode failed on the decision prompt (" + std::to_string(rc) + ")");
@@ -352,7 +369,7 @@ void engine::decode_parts(const std::vector<prompt_part> & parts) {
                         if (batch.n_tokens == n_batch) {
                             flush();
                         }
-                        common_batch_add(batch, t, pos[k]++, { parts[k].seq }, false);
+                        batch_add(batch, t, pos[k]++, { parts[k].seq }, false);
                     }
                 }
             }
@@ -449,7 +466,7 @@ std::vector<std::vector<float>> engine::score_branches(const std::vector<branch>
                 if (last) {
                     out_idx.push_back(batch.n_tokens);
                 }
-                common_batch_add(batch, br.toks[std::min(i, (int) br.toks.size() - 1)], br.pos0 + (llama_pos) i, { seq }, last);
+                batch_add(batch, br.toks[std::min(i, (int) br.toks.size() - 1)], br.pos0 + (llama_pos) i, { seq }, last);
             }
         }
         const int rc = llama_decode(ctx, batch);
@@ -865,7 +882,7 @@ std::pair<std::string, std::string> render_prompt(const common_chat_templates * 
     usr.role    = "user";
     usr.content = sentinel;
     in.messages = { sys, usr };
-    const std::string prompt = common_chat_templates_apply(tmpls, in).prompt;
+    const std::string prompt = common_chat_templates_apply(tmpls, in).prompt.str();
     const size_t at = prompt.find(sentinel);
     if (at == std::string::npos) {
         throw std::runtime_error("the chat template did not keep the user message");

@@ -1,9 +1,15 @@
 # llama.cpp - System One
 
 A fork of [llama.cpp](https://github.com/ggml-org/llama.cpp) whose `llama-server` serves TypeSafe AI's
-[System One](https://api.typesafe.ai/docs) API itself: `POST /v1/systemone` and `GET /v1/models`, following the
-official [OpenAPI](https://api.typesafe.ai/openapi.json). One process handles HTTP, validation, prompt caching and
-scoring. The official SDKs talk to a local GGUF model; only the base URL changes.
+[System One](https://api.typesafe.ai/docs) wire format itself, scored by a parallel decision engine on any local GGUF
+model: `POST /v1/decision` and `GET /v1/models`, following the official
+[OpenAPI](https://api.typesafe.ai/openapi.json). One process handles HTTP, validation, prompt caching and scoring.
+
+> `POST /v1/systemone` is upstream llama.cpp's own System One API, kept as upstream implements it: it serves
+> dedicated decision models (laya, julia-1, lev, openjev, kev; see
+> [tools/server/README.md](tools/server/README.md#post-v1systemone-typesafe-compatible-system-one-api)). This fork's implementation, which works with any chat model, is served at
+> `POST /v1/decision` with the same request and response format. The generic parallel-decision format by thecodacus
+> moved from `/v1/decision` to `POST /v1/decision/raw`.
 
 > The wire format matches; the answers come from your local model. Its classifications, probabilities and
 > confidence differ from TypeSafe's hosted Jev models and have their own calibration.
@@ -39,12 +45,13 @@ thecodacus designed and built:
 - the engine that answers a finite schema by scoring every allowed value as token paths forked from one cached
   context, all in one batched `llama_decode`, with exact constrained probabilities in tree mode
   ([decision-engine.cpp](tools/parallel-decision/decision-engine.cpp));
-- `POST /v1/decision` in `llama-server` and the `--decision-seqs` option (`b9244f893`);
+- the generic decision endpoint in `llama-server` (now `POST /v1/decision/raw`) and the `--decision-seqs` option
+  (`b9244f893`);
 - the `llama-parallel-decision` CLI and the [engine README](tools/parallel-decision/README.md) (`14d04e755`);
 - single-pass scoring for hybrid and recurrent models (`ad129b08d`);
 - [decision-playground](https://github.com/thecodacus/decision-playground), a browser UI for the endpoint.
 
-This fork adds the System One wire format (`/v1/systemone`, validation, `/v1/models` fields, router support),
+This fork adds the System One wire format (`/v1/decision`, validation, `/v1/models` fields, router support),
 request coalescing, the `x_labels` extension, two small engine changes (a per-field terminator and `make_input()`), and
 the tests and measurements below. The speed and exact probabilities described here come from thecodacus's engine.
 
@@ -82,12 +89,20 @@ Run with a local model. `--decision-seqs` enables the decision engine and is req
     -ngl 99 -fa on -sm none -c 32768 --decision-seqs 128 --port 8096
 ```
 
-Call it with the official Python SDK (`pip install typesafe-sdk`):
+Call it with the official Python SDK (`pip install typesafe-sdk`). The SDK posts to `/v1/systemone`, which is
+upstream's endpoint in this server, so give it a transport that sends those requests to `/v1/decision`:
 
 ```python
+import httpx2
 from typesafe_sdk import Choice, Noul, Score, TypeSafeClient
 
-with TypeSafeClient(api_key="local", base_url="http://localhost:8096") as client:
+class ToDecision(httpx2.HTTPTransport):
+    def handle_request(self, request):
+        if request.url.path == "/v1/systemone":
+            request.url = request.url.copy_with(path="/v1/decision")
+        return super().handle_request(request)
+
+with TypeSafeClient(api_key="local", base_url="http://localhost:8096", transport=ToDecision()) as client:
     r = client.system_one(
         state={"message": "I was charged twice. Please fix this ASAP."},
         questions={
@@ -103,7 +118,7 @@ print(r.choices["department"].choice, r.choices["department"].probabilities)
 Or with plain HTTP:
 
 ```bash
-curl http://localhost:8096/v1/systemone -H "Content-Type: application/json" -d '{
+curl http://localhost:8096/v1/decision -H "Content-Type: application/json" -d '{
   "model": "jev-latest",
   "state": "Customer reports a duplicate card charge and asks for a refund.",
   "questions": {
@@ -135,7 +150,7 @@ curl http://localhost:8096/v1/systemone -H "Content-Type: application/json" -d '
 
 ## API
 
-### `POST /v1/systemone`
+### `POST /v1/decision`
 
 Request and response follow the official schema: `model`, `state` (string, object or array) and a map of named
 `questions`; the response has `model`, `answers` (keyed by the question names, in request order) and `usage`.
@@ -144,7 +159,7 @@ Request and response follow the official schema: `model`, `state` (string, objec
 |---|---|
 | `model` | The model name or any `--alias` (e.g. `-a jev-latest`). The response names the model that answered. Unknown model: 404. |
 | Nested JSON | Allowed wherever the schema allows objects or arrays: `state`, `instructions`, criteria descriptions. `legend` returns the criteria as sent. |
-| `confidence` | `--systemone-confidence entropy` (default: 1 - normalised entropy) or `max` (highest probability). A local, uncalibrated statistic. |
+| `confidence` | `--decision-confidence entropy` (default: 1 - normalised entropy) or `max` (highest probability). A local, uncalibrated statistic. |
 | `usage` | `input_tokens` = the whole rendered prompt, cached tokens included; `output_tokens` = the number of questions. |
 | Validation | 422 `{"detail": [{"type", "loc", "msg", "input", "ctx"}]}` in FastAPI / pydantic form. Types, `loc` and messages were checked against pydantic run on the official SDK's generated schemas. |
 | Other errors | `{"detail": "..."}`: 404 unknown model, 503 when `--decision-seqs` is missing, 401 with `--api-key` and a bad or missing key. |
@@ -165,7 +180,7 @@ These extend the official schema and are opt-in.
   ```
 
   Use `letters` for ids, long codes or awkward keys.
-- **`x_layout`** on the request (server default: `--systemone-layout`), one of four prompt layouts. All of them score
+- **`x_layout`** on the request (server default: `--decision-layout`), one of four prompt layouts. All of them score
   every question in one batched pass; they differ in what the model sees before each answer.
 
   | Layout | What each question sees |
@@ -180,7 +195,7 @@ These extend the official schema and are opt-in.
   `x_shared_images` first, as part of the cached prefix (reference images, logos, examples; requests with the same
   shared images share the cache and are batched together), then the request's own `x_images`, then the state. This
   holds for every layout. A bad reference gets a 422 at `["body", "x_images", i]`. http(s) and `file://` references
-  are refused unless the server runs with `--systemone-media-urls`. `usage.input_tokens` includes the image tokens.
+  are refused unless the server runs with `--decision-media-urls`. `usage.input_tokens` includes the image tokens.
 - **`?debug=1`** adds `x_debug` to the response: timings, batch size, cache hit, scored rows, image tokens (`shared_image_tokens`, `context_image_tokens`), the system prompt, the full rendered prompt (`prompt_prefix` + `prompt_state`, images shown as media markers) and per question the text it is scored after and its candidates (`fields`).
 
 ### `GET /v1/models`
@@ -191,7 +206,7 @@ and the model file's date. The OpenAI-style `data[]` list stays alongside for Op
 
 ### Router mode
 
-With `--models-preset` / `--models-dir`, the router validates `/v1/systemone` requests itself (same 422 bodies) and
+With `--models-preset` / `--models-dir`, the router validates `/v1/decision` requests itself (same 422 bodies) and
 forwards them to the model named in `model`. `GET /v1/models` lists every model and alias in `models[]`. Options such
 as `decision-seqs`, `model-description` and `model-release-date` can be set per preset.
 
@@ -200,9 +215,9 @@ as `decision-seqs`, `model-description` and `model-release-date` can be set per 
 | Option | Default | Meaning |
 |---|---|---|
 | `--decision-seqs N` | 0 (off) | Sequences reserved for decisions; required, at least 3. Size it to about `(1 + questions) x concurrent requests`. Too few splits a batch into sequential groups. |
-| `--systemone-confidence` | `entropy` | `entropy` or `max`. |
-| `--systemone-layout` | `questions-first` | Default prompt layout: `questions-first` or `state-first` (see `x_layout`). |
-| `--systemone-media-urls` | off | Also accept http(s) image URLs (fetched by the server) and `file://` references (with `--media-path`) in `x_images` / `x_shared_images`. Lets clients make the server fetch URLs (SSRF): enable only for trusted clients. |
+| `--decision-confidence` | `entropy` | `entropy` or `max`. |
+| `--decision-layout` | `questions-first` | Default prompt layout: `questions-first`, `catalog`, `state-first` or `state-first-context` (see `x_layout`). |
+| `--decision-media-urls` | off | Also accept http(s) image URLs (fetched by the server) and `file://` references (with `--media-path`) in `x_images` / `x_shared_images`. Lets clients make the server fetch URLs (SSRF): enable only for trusted clients. |
 | `--model-description` | GGUF `general.description` | `description` in `/v1/models`. |
 | `--model-release-date` | model file date | `release_date` in `/v1/models`. |
 | `-a, --alias` | | Extra model names, e.g. `jev-latest`. |
@@ -230,10 +245,10 @@ four aspects, price, quality, speed and customer service, as good, bad or not me
 ```bash
 cd tools/server/tests
 pip install -r requirements.txt typesafe-sdk
-LLAMA_SERVER_BIN_PATH=../../../build/bin/llama-server pytest unit/test_systemone.py
+LLAMA_SERVER_BIN_PATH=../../../build/bin/llama-server pytest unit/test_decision.py
 ```
 
-[test_systemone.py](tools/server/tests/unit/test_systemone.py) checks every response against a vendored copy of the
+[test_decision.py](tools/server/tests/unit/test_decision.py) checks every response against a vendored copy of the
 official OpenAPI ([fixtures/systemone-openapi.json](tools/server/tests/fixtures/systemone-openapi.json)) and covers
 validation errors, `/v1/models`, auth, concurrency, router mode, `x_labels` and the official SDK. The test harness
 downloads a tiny model, so the build needs HTTPS: build with OpenSSL, or with `-DLLAMA_BUILD_BORINGSSL=ON` to fetch
@@ -253,12 +268,12 @@ BoringSSL.
 |---|---|
 | [tools/parallel-decision/systemone.cpp](tools/parallel-decision/systemone.cpp) | Validation, prompt and answer serialisation for System One |
 | [tools/parallel-decision/decision-engine.cpp](tools/parallel-decision/decision-engine.cpp) | Parallel constrained scoring engine |
-| [tools/server/server-context.cpp](tools/server/server-context.cpp) | `/v1/systemone` route, request coalescing, `/v1/models` fields |
-| [tools/parallel-decision/README.md](tools/parallel-decision/README.md) | Engine and `/v1/decision` documentation |
+| [tools/server/server-context.cpp](tools/server/server-context.cpp) | `/v1/decision` and `/v1/decision/raw` routes, request coalescing, `/v1/models` fields |
+| [tools/parallel-decision/README.md](tools/parallel-decision/README.md) | Engine, `/v1/decision/raw` and `/v1/decision` documentation |
 
 ## Credits
 
-- **Parallel decision engine, `/v1/decision`, `llama-parallel-decision`:** [thecodacus](https://github.com/thecodacus),
+- **Parallel decision engine, `/v1/decision/raw`, `llama-parallel-decision`:** [thecodacus](https://github.com/thecodacus),
   [thecodacus/llama.cpp @ parallel-decision](https://github.com/thecodacus/llama.cpp/tree/parallel-decision). See
   [Built on parallel-decision by thecodacus](#built-on-parallel-decision-by-thecodacus).
 - **llama.cpp:** [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) and its contributors.
